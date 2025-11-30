@@ -22,7 +22,34 @@ from reaper_python import *
 # 1. CONFIGURATION
 # ==============================================================================
 PYTHON_EXEC = "/usr/bin/python3"
-BASE_DIR    = "/home/michael/audio/camera-script"
+
+# --- DYNAMIC PATH SETUP ---
+# REAPER does not support __file__. We must construct the path relative
+# to REAPER's resource directory.
+try:
+    # RPR_GetResourcePath() returns the base config folder (e.g. ~/.config/REAPER)
+    # We assume this script lives in <ResourcePath>/Scripts/reacanon-record
+    reaper_res_path = RPR_GetResourcePath()
+    BASE_DIR = os.path.join(reaper_res_path, "Scripts", "reacanon-record")
+
+    # Verify it exists
+    if not os.path.exists(BASE_DIR):
+        RPR_ShowConsoleMsg(
+            f"\n[FATAL ERROR] Script folder not found!\n"
+            f"The script expects to be located at:\n{BASE_DIR}\n\n"
+            f"Please create this folder and move the python scripts there.\n"
+        )
+        # Exit immediately prevents the rest of the script from crashing with NameErrors
+        sys.exit(1)
+
+except Exception as e:
+    # Allow sys.exit() to work if called above
+    if isinstance(e, SystemExit):
+        raise
+
+    RPR_ShowConsoleMsg(f"\n[Error] Failed to determine script path: {e}\n")
+    sys.exit(1)
+
 RECORD_SCRIPT = os.path.join(BASE_DIR, "canon_edsdk_controller.py")
 CLAP_SCRIPT   = os.path.join(BASE_DIR, "audio_sync_detector.py")
 
