@@ -108,49 +108,50 @@ def get_source_file(item):
 # ==============================================================================
 # 3. SYNC LOGIC
 # ==============================================================================
-def detect_clap(filepath):
-    """Runs the python clap detector and returns float timestamp."""
+def detect_offset(ref_path, target_path):
+    """Runs the python sync detector and returns float offset in seconds."""
     try:
-        cmd = [PYTHON_EXEC, CLAP_SCRIPT, filepath]
+        cmd = [PYTHON_EXEC, CLAP_SCRIPT, ref_path, target_path]
         res = subprocess.run(cmd, capture_output=True, text=True)
-        return float(res.stdout.strip()) if res.returncode == 0 else None
+        if res.returncode == 0:
+            return float(res.stdout.strip())
+        else:
+            console_msg(f"[Sync Error] {res.stderr}")
+            return None
     except Exception as e:
-        console_msg(f"[Sync] Error: {e}")
+        console_msg(f"[Sync] Exception: {e}")
         return None
 
 def run_synchronization(audio_item, video_item, video_path):
     """Aligns video item to match audio item based on clap."""
     console_msg("--- Starting Auto-Sync ---")
 
-    # 1. Get Audio Clap
+    # 1. Get Audio File
     audio_path = get_source_file(audio_item)
-    console_msg(f"Analyzing Audio: {os.path.basename(audio_path)}")
-    t_audio_clap = detect_clap(audio_path)
-
-    if t_audio_clap is None:
-        console_msg("❌ Could not find clap in audio.")
+    if not audio_path or not os.path.exists(audio_path):
+        console_msg("❌ Reference audio file not found.")
         return
 
-    # 2. Get Video Clap
-    console_msg(f"Analyzing Video: {os.path.basename(video_path)}")
-    t_video_clap = detect_clap(video_path)
+    console_msg(f"Comparing:\nRef: {os.path.basename(audio_path)}\nTgt: {os.path.basename(video_path)}")
 
-    if t_video_clap is None:
-        console_msg("❌ Could not find clap in video.")
+    # 2. Calculate Offset
+    # offset is positive if Target is LATE relative to Ref
+    offset = detect_offset(audio_path, video_path)
+
+    if offset is None:
+        console_msg("❌ Sync failed.")
         return
 
-    # 3. Calculate Offset
-    # Absolute Time of Clap = Audio_Start + Audio_Clap_Offset
-    audio_start = RPR_GetMediaItemInfo_Value(audio_item, "D_POSITION")
-    abs_clap_time = audio_start + t_audio_clap
+    console_msg(f"Calculated Offset: {offset:.4f}s")
 
-    # New Video Position = Absolute_Clap_Time - Video_Clap_Offset
-    new_video_pos = abs_clap_time - t_video_clap
+    # 3. Move Video Item
+    # If target is late (+0.5s), we must move it LEFT (-0.5s) to align.
+    audio_pos = RPR_GetMediaItemInfo_Value(audio_item, "D_POSITION")
+    new_video_pos = audio_pos - offset
+
     RPR_SetMediaItemInfo_Value(video_item, "D_POSITION", new_video_pos)
-
-    # 4. Add Marker
-    RPR_AddProjectMarker(0, False, abs_clap_time, 0, "Sync Point", -1)
     RPR_UpdateArrange()
+
     console_msg(f"✅ Synced! Video moved to {new_video_pos:.3f}s")
 
 # ==============================================================================
