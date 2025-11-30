@@ -17,12 +17,14 @@ Co-author: Michael Kirkland
 """
 
 import sys
+import shutil
 import numpy as np
 import ffmpeg
 from scipy import signal
 
 # --- CONFIGURATION ---
-FFMPEG_BINARY = "/usr/bin/ffmpeg"
+# Use shutil to find ffmpeg in the system PATH (fallback to /usr/bin/ffmpeg)
+FFMPEG_BINARY = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
 SAMPLE_RATE = 48000
 SCAN_DURATION = 60.0    # Scan duration in seconds
 # Frequencies below this will be ignored (removes wind/handling rumble)
