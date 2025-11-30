@@ -19,119 +19,45 @@ import os
 import time
 import threading
 import signal
-from ctypes import *
+from ctypes import byref, c_void_p, c_uint32, c_bool
+
+# Import everything from C wrapper
+from edsdk_defs import *
 
 # ==============================================================================
-# CONFIGURATION & CONSTANTS
+# GLOBALS & STATE
 # ==============================================================================
-LIB_PATHS = ["libEDSDK.so", "./libEDSDK.so", "../libEDSDK.so", "/usr/local/lib/libEDSDK.so"]
 RESULT_FILE = "/tmp/camera_result.txt"
-
-# EDSDK Constants
-EDS_ERR_OK = 0x00000000
-EDS_ERR_DEVICE_BUSY = 0x00000080
-EDS_ERR_NOT_READY = 0x00002019 # Not in recordable state
-
-# Property IDs
-kEdsPropID_SaveTo = 0x0000000B
-kEdsPropID_Record = 0x00000510
-kEdsPropID_Evf_OutputDevice = 0x00000500
-
-# Values
-kEdsSaveTo_Camera = 1
-kEdsEvfOutputDevice_TFT = 1
-EDS_RECORD_START = 4
-EDS_RECORD_STOP = 0
-
-# Commands
-kEdsCameraStatusCommand_UIUnLock = 1
-kEdsCameraStatusCommand_ExitDirectTransfer = 3
-
-# Events
-kEdsObjectEvent_All = 0x00000200
-kEdsObjectEvent_DirItemCreated = 0x00000204
-
-# Structures
-class EdsDirectoryItemInfo(Structure):
-    _fields_ = [
-        ("size", c_uint64), ("isFolder", c_uint32), ("groupID", c_uint32),
-        ("option", c_uint32), ("szFileName", c_char * 256),
-        ("format", c_uint32), ("dateTime", c_uint32),
-    ]
-
-# ==============================================================================
-# EDSDK WRAPPER CLASS
-# ==============================================================================
-class EdsdkWrapper:
-    """Handles loading the shared library and defining C function signatures."""
-    def __init__(self):
-        self.lib = self._load_library()
-        self._define_prototypes()
-        self.Retain = getattr(self.lib, "EdsRetain") # Shortcut for internal use
-
-    def _load_library(self):
-        for path in LIB_PATHS:
-            try:
-                return CDLL(path)
-            except OSError:
-                continue
-        print(f"❌ Error: Could not load libEDSDK.so. Checked: {LIB_PATHS}")
-        sys.exit(1)
-
-    def _define_prototypes(self):
-        # Helper to reduce boilerplate
-        def proto(name, res, args):
-            f = getattr(self.lib, name)
-            f.restype, f.argtypes = res, args
-
-        proto("EdsInitializeSDK", c_int32, [])
-        proto("EdsTerminateSDK", c_int32, [])
-        proto("EdsGetCameraList", c_int32, [POINTER(c_void_p)])
-        proto("EdsGetChildCount", c_int32, [c_void_p, POINTER(c_uint32)])
-        proto("EdsGetChildAtIndex", c_int32, [c_void_p, c_uint32, POINTER(c_void_p)])
-        proto("EdsOpenSession", c_int32, [c_void_p])
-        proto("EdsCloseSession", c_int32, [c_void_p])
-        proto("EdsRelease", c_int32, [c_void_p])
-        proto("EdsSetPropertyData", c_int32, [c_void_p, c_uint32, c_int32, c_uint32, c_void_p])
-        proto("EdsSendStatusCommand", c_int32, [c_void_p, c_uint32, c_int32])
-        proto("EdsSetObjectEventHandler", c_int32, [c_void_p, c_uint32, c_void_p, c_void_p])
-        proto("EdsGetDirectoryItemInfo", c_int32, [c_void_p, POINTER(EdsDirectoryItemInfo)])
-        proto("EdsCreateFileStream", c_int32, [c_char_p, c_uint32, c_uint32, POINTER(c_void_p)])
-        proto("EdsDownload", c_int32, [c_void_p, c_uint64, c_void_p])
-        proto("EdsDownloadComplete", c_int32, [c_void_p])
-        proto("EdsGetEvent", c_int32, [])
-        proto("EdsSetProgressCallback", c_int32, [c_void_p, c_void_p, c_int32, c_void_p])
-
-sdk = EdsdkWrapper()
+_download_queue = []
+_download_event = threading.Event()
 
 # ==============================================================================
 # CALLBACK HANDLERS
 # ==============================================================================
-# Global queues are necessary because C-callbacks don't handle class instance methods well
-_download_queue = []
-_download_event = threading.Event()
-
-@CFUNCTYPE(c_int32, c_uint32, c_void_p, c_void_p)
+@EdsObjectEventHandler
 def on_object_event(event, inRef, context):
-    """Called by camera when a file is created."""
+    """Called by camera when a file is created (kEdsObjectEvent_DirItemCreated)."""
     if event == kEdsObjectEvent_DirItemCreated:
         print("New file detected on camera.")
         sys.stdout.flush()
-        # Retain reference so it doesn't vanish before we download (or discard) it
+
+        # Retain reference so it doesn't vanish before we download it
         if inRef:
-            sdk.Retain(inRef)
+            sdk.lib.EdsRetain(inRef)
             _download_queue.append(inRef)
+
+        # Signal the main thread that file is ready
         _download_event.set()
 
     else:
-        # Only release non-download events
+        # We must release references for events we don't care about
         if inRef:
             sdk.lib.EdsRelease(inRef)
     return 0
 
-@CFUNCTYPE(c_int32, c_uint32, c_void_p, POINTER(c_bool))
+@EdsProgressCallback
 def on_progress(percent, context, cancel):
-    """Called during file download."""
+    """Called during file download to report progress."""
     print(f"Progress: {percent}%")
     sys.stdout.flush()
     return 0
@@ -196,18 +122,19 @@ class CameraSession:
         return sdk.lib.EdsSetPropertyData(self.cam, prop_id, 0, 4, byref(val))
 
     def _retry_action(self, prop_id, value, retries=5, desc="Command"):
-        """Helper to retry camera commands if device is busy."""
-        for _ in range(retries):
+        """Retry camera commands with exponential backoff."""
+        for i in range(retries):
             err = self._set_prop(prop_id, value)
             if err == EDS_ERR_OK: return
 
             # If busy, pump events and wait
             if err in (EDS_ERR_NOT_READY, EDS_ERR_DEVICE_BUSY):
-                sdk.lib.EdsGetEvent()
-                time.sleep(0.5)
+                sdk.lib.EdsGetEvent() # Pump events
+                time.sleep(0.1 * (i + 1)) # Backoff: 0.1s, 0.2s, 0.3s...
             else:
                 print(f"Warning: {desc} error {hex(err)}")
                 break
+
         if err != EDS_ERR_OK and desc == "Start Record":
              raise RuntimeError(f"Failed to start recording (Err: {hex(err)})")
 
@@ -276,8 +203,7 @@ class CameraSession:
         if self.is_connected:
             # Crucial: Force UI Unlock
             self._force_unlock()
-            time.sleep(0.5)
-
+            time.sleep(0.2)
             sdk.lib.EdsCloseSession(self.cam)
             sdk.lib.EdsRelease(self.cam)
         sdk.lib.EdsTerminateSDK()
@@ -289,7 +215,7 @@ class CameraSession:
 # ==============================================================================
 def main():
     if len(sys.argv) < 3:
-        print("Usage: python3 canon_record.py <path> <duration>")
+        print("Usage: python3 canon_edsdk_controller.py <path> <duration>")
         return
 
     dest_folder, duration = sys.argv[1], float(sys.argv[2])
@@ -315,14 +241,17 @@ def main():
             session.setup_recording()
             session.start_record()
 
-            # Recording Loop
+            # Recording Loop (Main Running State)
             start_time = time.time()
             while not stop_event.is_set():
                 if time.time() - start_time >= duration:
                     print("Duration reached.")
                     break
-                # Pump EDSDK event loop
+
+                # Keep the SDK event queue moving
                 sdk.lib.EdsGetEvent()
+
+                # Short sleep is fine here, we are just waiting for user input/timer
                 time.sleep(0.1)
 
             # Teardown Sequence
@@ -333,15 +262,23 @@ def main():
             print("Waiting for camera buffer flush...")
             sys.stdout.flush()
 
-            # Wait for file event (max 15s)
-            wait_s = time.time()
-            while time.time() - wait_s < 15.0:
-                sdk.lib.EdsGetEvent()
-                if _download_event.is_set(): break
-                time.sleep(0.1)
+            wait_start = time.time()
+            file_ready = False
 
-            if should_download:
+            # Poll for the file event (Fast Polling)
+            while time.time() - wait_start < 15.0:
+                sdk.lib.EdsGetEvent()
+                if _download_event.is_set():
+                    file_ready = True
+                    break
+
+                # Sleep very briefly to keep CPU usage low but reaction fast
+                time.sleep(0.05)
+
+            if should_download and file_ready:
                 session.download_pending_files(dest_folder)
+            elif not file_ready:
+                print("Warning: Timed out waiting for file generation.")
             else:
                 print("Skipping download (Cancelled).")
                 # Release items we aren't downloading
