@@ -51,7 +51,7 @@ except Exception as e:
     sys.exit(1)
 
 RECORD_SCRIPT = os.path.join(BASE_DIR, "canon_edsdk_controller.py")
-CLAP_SCRIPT   = os.path.join(BASE_DIR, "audio_sync_detector.py")
+AUDIO_SYNC_SCRIPT   = os.path.join(BASE_DIR, "audio_sync_detector.py")
 
 # Files
 PID_FILE    = "/tmp/camera_script.pid"
@@ -138,7 +138,7 @@ def get_source_file(item):
 def detect_offset(ref_path, target_path):
     """Runs the python sync detector and returns float offset in seconds."""
     try:
-        cmd = [PYTHON_EXEC, CLAP_SCRIPT, ref_path, target_path]
+        cmd = [PYTHON_EXEC, AUDIO_SYNC_SCRIPT, ref_path, target_path]
         res = subprocess.run(cmd, capture_output=True, text=True)
         if res.returncode == 0:
             return float(res.stdout.strip())
