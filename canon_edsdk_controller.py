@@ -8,6 +8,7 @@ Features:
 - Automatic file download via event callbacks.
 - Real-time progress reporting to stdout for REAPER integration.
 - Clean session shutdown to prevent camera UI hangs.
+- "Zombie" state protection (Force unlock on connect).
 
 Author: Slav Basharov
 Co-author: Michael Kirkland
@@ -178,8 +179,17 @@ class CameraSession:
         self.is_connected = True
         time.sleep(1.0) # Warmup
 
+        # --- ZOMBIE PROTECTION ---
+        # Force unlock immediately to rescue camera from previous crashes
+        self._force_unlock()
+
         # Register Event Handler
         sdk.lib.EdsSetObjectEventHandler(self.cam, kEdsObjectEvent_All, on_object_event, None)
+
+    def _force_unlock(self):
+        """Attempts to clear UI locks from previous sessions."""
+        sdk.lib.EdsSendStatusCommand(self.cam, kEdsCameraStatusCommand_UIUnLock, 0)
+        sdk.lib.EdsSendStatusCommand(self.cam, kEdsCameraStatusCommand_ExitDirectTransfer, 0)
 
     def _set_prop(self, prop_id, value):
         val = c_uint32(value)
@@ -226,8 +236,10 @@ class CameraSession:
     def download_pending_files(self, dest_dir):
         """Downloads all files in the queue."""
         for item_ref in _download_queue:
-            self._download_single(item_ref, dest_dir)
-            sdk.lib.EdsRelease(item_ref) # Release the retained reference
+            try:
+                self._download_single(item_ref, dest_dir)
+            finally:
+                sdk.lib.EdsRelease(item_ref) # Release the retained reference
 
     def _download_single(self, dir_item, dest_dir):
         info = EdsDirectoryItemInfo()
@@ -263,8 +275,7 @@ class CameraSession:
         sys.stdout.flush()
         if self.is_connected:
             # Crucial: Force UI Unlock
-            sdk.lib.EdsSendStatusCommand(self.cam, kEdsCameraStatusCommand_UIUnLock, 0)
-            sdk.lib.EdsSendStatusCommand(self.cam, kEdsCameraStatusCommand_ExitDirectTransfer, 0)
+            self._force_unlock()
             time.sleep(0.5)
 
             sdk.lib.EdsCloseSession(self.cam)
@@ -322,9 +333,9 @@ def main():
             print("Waiting for camera buffer flush...")
             sys.stdout.flush()
 
-            # Wait for file event (max 10s)
+            # Wait for file event (max 15s)
             wait_s = time.time()
-            while time.time() - wait_s < 10.0:
+            while time.time() - wait_s < 15.0:
                 sdk.lib.EdsGetEvent()
                 if _download_event.is_set(): break
                 time.sleep(0.1)
