@@ -7,7 +7,7 @@ Features:
 - Robust recording start/stop with retry logic.
 - Automatic file download via event callbacks.
 - File-based IPC for Stop/Cancel commands and Logging.
-- Real-time progress reporting to stdout for REAPER integration.
+- Real-time progress reporting to stdout.
 - Clean session shutdown to prevent camera UI hangs.
 - "Zombie" state protection (Force unlock on connect).
 
@@ -24,18 +24,18 @@ import tempfile
 from ctypes import byref, c_void_p, c_uint32, c_bool
 
 # Import everything from C wrapper
-from edsdk_defs import *
+from canon_edsdk_defs import *
 
 # ==============================================================================
 # GLOBALS & STATE
 # ==============================================================================
 TEMP_DIR = tempfile.gettempdir()
-PID_FILE = os.path.join(TEMP_DIR, "reacanon_controller.pid")
+PID_FILE = os.path.join(TEMP_DIR, "canon_edsdk_controller.pid")
 
 # IPC Files
-LOG_FILE = os.path.join(TEMP_DIR, "reacanon_controller.log")
-CMD_SAVE = os.path.join(TEMP_DIR, "reacanon_cmd_save")
-CMD_CANCEL = os.path.join(TEMP_DIR, "reacanon_cmd_cancel")
+LOG_FILE = os.path.join(TEMP_DIR, "canon_edsdk_controller.log")
+CMD_SAVE = os.path.join(TEMP_DIR, "canon_edsdk_cmd_save")
+CMD_CANCEL = os.path.join(TEMP_DIR, "canon_edsdk_cmd_cancel")
 
 _download_queue = []
 _stop_event = threading.Event()

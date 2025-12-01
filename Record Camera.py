@@ -66,8 +66,8 @@ AUDIO_SYNC_SCRIPT   = os.path.join(BASE_DIR, "audio_sync_detector.py")
 
 # Files
 TEMP_DIR = tempfile.gettempdir()
-PID_FILE = os.path.join(TEMP_DIR, "reacanon_controller.pid")
-LOG_FILE = os.path.join(TEMP_DIR, "reacanon_controller.log")
+PID_FILE = os.path.join(TEMP_DIR, "canon_edsdk_controller.pid")
+LOG_FILE = os.path.join(TEMP_DIR, "canon_edsdk_controller.log")
 
 # ==============================================================================
 # 2. REAPER HELPER FUNCTIONS
@@ -282,7 +282,7 @@ class CameraProcess:
         CameraProcess.save_mode = save
 
         # 3. Send Command via File
-        filename = "reacanon_cmd_save" if save else "reacanon_cmd_cancel"
+        filename = "canon_edsdk_cmd_save" if save else "canon_edsdk_cmd_cancel"
         cmd_path = os.path.join(TEMP_DIR, filename)
 
         if save: console_msg("[Camera] Stopping & Downloading...")
