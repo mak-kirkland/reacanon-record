@@ -27,8 +27,32 @@ from reaper_python import *
 # 1. CONFIGURATION
 # ==============================================================================
 # --- CROSS-PLATFORM PYTHON DETECTION ---
-# Windows usually provides 'python', while Unix/Mac prefers 'python3'
-PYTHON_EXEC = shutil.which("python3") or shutil.which("python")
+# Windows usually provides 'python', while Unix/Mac prefers 'python3'.
+# On Windows, 'python3' often points to the 'App Execution Alias' (WindowsApps),
+# which fails when called from scripts. We prioritize 'python' on Windows.
+
+if platform.system() == "Windows":
+    PYTHON_EXEC = shutil.which("python") or shutil.which("python3")
+else:
+    PYTHON_EXEC = shutil.which("python3") or shutil.which("python")
+
+# Fallback: Check if the found python is the Windows Store stub
+if PYTHON_EXEC and "WindowsApps" in PYTHON_EXEC and platform.system() == "Windows":
+    # Try to find a better one if the first one was the stub
+    # This happens if 'python' and 'python3' BOTH point to the stub
+    # We try to guess standard install paths
+    potential_paths = [
+        os.path.join(os.getenv("LOCALAPPDATA", ""), "Programs", "Python", "Python313", "python.exe"),
+        os.path.join(os.getenv("LOCALAPPDATA", ""), "Programs", "Python", "Python312", "python.exe"),
+        os.path.join(os.getenv("LOCALAPPDATA", ""), "Programs", "Python", "Python311", "python.exe"),
+        "C:\\Python313\\python.exe",
+        "C:\\Python312\\python.exe",
+        "C:\\Python311\\python.exe",
+    ]
+    for p in potential_paths:
+        if os.path.exists(p):
+            PYTHON_EXEC = p
+            break
 
 if not PYTHON_EXEC:
     RPR_ShowMessageBox("Could not find Python! Please install Python 3.", "Error", 0)
@@ -234,12 +258,15 @@ class CameraProcess:
              env["LD_LIBRARY_PATH"] = f"{BASE_DIR}:{env.get('LD_LIBRARY_PATH','')}"
 
         try:
+            console_msg(f"Using Python: {PYTHON_EXEC}")
+
             # Use DETACHED_PROCESS on Windows to hide console
             creation_flags = 0x00000008 if platform.system() == "Windows" else 0
 
+            # DEBUG: Capture stderr to see why it crashes
             proc = subprocess.Popen(
                 [PYTHON_EXEC, "-u", RECORD_SCRIPT, get_project_path(), "3600"],
-                cwd=BASE_DIR, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                cwd=BASE_DIR, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 creationflags=creation_flags
             )
 
@@ -249,6 +276,10 @@ class CameraProcess:
             start_wait = time.time()
             success = False
             while time.time() - start_wait < 5.0:
+                # Check if process died
+                if proc.poll() is not None:
+                    break
+
                 pid = CameraProcess.get_pid()
                 if pid:
                     success = True
@@ -256,9 +287,22 @@ class CameraProcess:
                 time.sleep(0.1)
 
             if not success:
+                # If we are here, process either died or timed out
                 console_msg("[Error] Camera script failed to initialize.")
-                try: proc.kill()
-                except: pass
+
+                # Check for error output
+                if proc.poll() is not None:
+                    # Process died, read stderr
+                    err_out = proc.stderr.read().decode('utf-8', errors='ignore')
+                    if err_out:
+                        console_msg(f"\n--- CONTROLLER CRASH LOG ---\n{err_out}\n----------------------------")
+                    else:
+                        console_msg("[Error] Process died silently.")
+                else:
+                    console_msg("[Error] Process timed out (no PID file).")
+                    try: proc.kill()
+                    except: pass
+
                 return
 
             RPR_Main_OnCommand(1013, 0) # Record REAPER
