@@ -22,7 +22,6 @@ import threading
 import signal
 import tempfile
 import socket
-import platform
 from ctypes import byref, c_void_p, c_uint32, c_bool
 
 # Import everything from C wrapper
