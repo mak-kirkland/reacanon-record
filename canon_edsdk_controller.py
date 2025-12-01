@@ -10,7 +10,8 @@ Features:
 - Real-time progress reporting to stdout.
 - Clean session shutdown to prevent camera UI hangs.
 - "Zombie" state protection (Force unlock on connect).
-- Verify & delete: Checks size and runs FFmpeg integrity check before deleting from card.
+- Verify & delete (Save): Checks size and integrity before deleting.
+- Delete on Cancel: Wipes file from card if user cancels.
 
 Author: Slav Basharov
 Co-author: Michael Kirkland
@@ -226,6 +227,19 @@ class CameraSession:
             finally:
                 sdk.lib.EdsRelease(item_ref) # Release the retained reference
 
+    def delete_pending_files(self):
+        """Deletes all files in the queue (used for Cancel workflow)."""
+        for item_ref in _download_queue:
+            try:
+                log("Cancelling: Deleting file from card...")
+                err = sdk.lib.EdsDeleteDirectoryItem(item_ref)
+                if err != 0:
+                    log(f"Warning: Delete failed (Err {hex(err)})")
+                else:
+                    log("File deleted.")
+            finally:
+                sdk.lib.EdsRelease(item_ref)
+
     def _download_single(self, dir_item, dest_dir):
         info = EdsDirectoryItemInfo()
         sdk.lib.EdsGetDirectoryItemInfo(dir_item, byref(info))
@@ -380,9 +394,8 @@ def main():
             elif not file_ready:
                 log("Warning: Timed out waiting for file generation.")
             else:
-                log("Skipping download (Cancelled).")
-                # Release items we aren't downloading
-                for item in _download_queue: sdk.lib.EdsRelease(item)
+                log("Command: Cancel. Cleaning up SD card...")
+                session.delete_pending_files()
 
     except Exception as e:
         log(f"Error: {e}")
