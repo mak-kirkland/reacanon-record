@@ -6,7 +6,7 @@ Headless script to control Canon cameras via EDSDK.
 Features:
 - Robust recording start/stop with retry logic.
 - Automatic file download via event callbacks.
-- Socket-based IPC for instant Stop/Cancel commands.
+- File-based IPC for Stop/Cancel commands and Logging.
 - Real-time progress reporting to stdout for REAPER integration.
 - Clean session shutdown to prevent camera UI hangs.
 - "Zombie" state protection (Force unlock on connect).
@@ -21,7 +21,6 @@ import time
 import threading
 import signal
 import tempfile
-import socket
 from ctypes import byref, c_void_p, c_uint32, c_bool
 
 # Import everything from C wrapper
@@ -31,26 +30,37 @@ from edsdk_defs import *
 # GLOBALS & STATE
 # ==============================================================================
 TEMP_DIR = tempfile.gettempdir()
-PID_FILE = os.path.join(TEMP_DIR, "camera_script.pid")
+PID_FILE = os.path.join(TEMP_DIR, "reacanon_controller.pid")
+
+# IPC Files
+LOG_FILE = os.path.join(TEMP_DIR, "reacanon_controller.log")
+CMD_SAVE = os.path.join(TEMP_DIR, "reacanon_cmd_save")
+CMD_CANCEL = os.path.join(TEMP_DIR, "reacanon_cmd_cancel")
 
 _download_queue = []
 _stop_event = threading.Event()
 _should_download = True
-_client_socket = None
-_socket_lock = threading.Lock()
 
 def log(msg):
-    """Sends log messages back to REAPER via socket if connected."""
+    """Writes log messages to a shared file for REAPER to tail."""
     # Always print to stdout (helpful for debugging if running manually)
     print(msg)
     sys.stdout.flush()
 
-    with _socket_lock:
-        if _client_socket:
-            try:
-                _client_socket.sendall(f"LOG:{msg}\n".encode('utf-8'))
-            except:
-                pass # If client disconnected, just ignore
+    # Append to log file for REAPER
+    try:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"LOG:{msg}\n")
+    except Exception:
+        pass # Don't crash if disk is busy
+
+def send_result(path):
+    """Writes the final result path to the log file."""
+    try:
+        with open(LOG_FILE, 'a', encoding='utf-8') as f:
+            f.write(f"RESULT:{path}\n")
+    except Exception:
+        pass
 
 # ==============================================================================
 # CALLBACK HANDLERS
@@ -65,6 +75,7 @@ def on_object_event(event, inRef, context):
         if inRef:
             sdk.lib.EdsRetain(inRef)
             _download_queue.append(inRef)
+
     else:
         # We must release references for events we don't care about
         if inRef:
@@ -76,49 +87,6 @@ def on_progress(percent, context, cancel):
     """Called during file download to report progress."""
     log(f"Progress: {percent}%")
     return 0
-
-# ==============================================================================
-# IPC SERVER
-# ==============================================================================
-def start_ipc_server():
-    """Starts a socket server on a random port to listen for Stop/Cancel."""
-    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-    server.bind(('127.0.0.1', 0)) # Bind to port 0 (OS assigns free port)
-    port = server.getsockname()[1]
-    server.listen(1)
-
-    def listener():
-        global _should_download, _client_socket
-        # Wait for a connection (Blocking is fine in this thread)
-        while not _stop_event.is_set():
-            try:
-                conn, addr = server.accept()
-
-                # Disable Nagle's algorithm to ensure logs are sent immediately
-                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
-
-                with _socket_lock:
-                    _client_socket = conn
-
-                # Receive command
-                data = conn.recv(1024).decode('utf-8').strip()
-                if "SAVE" in data:
-                    log("Received command: SAVE")
-                    _should_download = True
-                    _stop_event.set()
-                elif "CANCEL" in data:
-                    log("Received command: CANCEL")
-                    _should_download = False
-                    _stop_event.set()
-
-                # We keep the connection open to stream logs back
-                # The main thread will use _client_socket to send RESULT
-            except Exception as e:
-                print(f"IPC Error: {e}")
-
-    t = threading.Thread(target=listener, daemon=True)
-    t.start()
-    return port
 
 # ==============================================================================
 # CAMERA SESSION CLASS
@@ -247,13 +215,8 @@ class CameraSession:
             sdk.lib.EdsDownloadComplete(dir_item)
 
             log(f"Saved: {save_path}")
+            send_result(save_path)
 
-            # Notify REAPER via Socket
-            with _socket_lock:
-                if _client_socket:
-                    try:
-                        _client_socket.sendall(f"RESULT:{save_path}\n".encode('utf-8'))
-                    except: pass
         finally:
             sdk.lib.EdsRelease(stream)
 
@@ -269,10 +232,6 @@ class CameraSession:
         sdk.lib.EdsTerminateSDK()
         log("Done.")
 
-        with _socket_lock:
-            if _client_socket:
-                _client_socket.close()
-
 # ==============================================================================
 # MAIN EXECUTION
 # ==============================================================================
@@ -285,6 +244,10 @@ def main():
 
     global _should_download
 
+    # Initialize Log (Clear previous run)
+    with open(LOG_FILE, 'w') as f:
+        f.write("")
+
     # Handle Standard Signals as backup
     def sig_handler(sig, frame):
         global _should_download
@@ -296,14 +259,11 @@ def main():
     signal.signal(signal.SIGTERM, sig_handler)
 
     try:
-        # Start IPC Server
-        port = start_ipc_server()
-
-        # Write PID and PORT to file for REAPER discovery
+        # Write PID to file for REAPER discovery
         with open(PID_FILE, 'w') as f:
-            f.write(f"{os.getpid()}\n{port}")
+            f.write(f"{os.getpid()}")
 
-        print(f"IPC Server listening on port {port}")
+        print(f"Controller started (PID {os.getpid()})")
         sys.stdout.flush()
 
         with CameraSession() as session:
@@ -316,6 +276,21 @@ def main():
                 if time.time() - start_time >= duration:
                     log("Duration reached.")
                     break
+
+                # IPC: Check for Command Files
+                if os.path.exists(CMD_SAVE):
+                    log("Command received: SAVE")
+                    _should_download = True
+                    _stop_event.set()
+                    try: os.remove(CMD_SAVE)
+                    except: pass
+
+                elif os.path.exists(CMD_CANCEL):
+                    log("Command received: CANCEL")
+                    _should_download = False
+                    _stop_event.set()
+                    try: os.remove(CMD_CANCEL)
+                    except: pass
 
                 # Keep the SDK event queue moving
                 sdk.lib.EdsGetEvent()
