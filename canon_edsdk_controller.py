@@ -34,7 +34,6 @@ TEMP_DIR = tempfile.gettempdir()
 PID_FILE = os.path.join(TEMP_DIR, "camera_script.pid")
 
 _download_queue = []
-_download_event = threading.Event()
 _stop_event = threading.Event()
 _should_download = True
 _client_socket = None
@@ -42,7 +41,6 @@ _socket_lock = threading.Lock()
 
 def log(msg):
     """Sends log messages back to REAPER via socket if connected."""
-    global _client_socket
     # Always print to stdout (helpful for debugging if running manually)
     print(msg)
     sys.stdout.flush()
@@ -67,10 +65,6 @@ def on_object_event(event, inRef, context):
         if inRef:
             sdk.lib.EdsRetain(inRef)
             _download_queue.append(inRef)
-
-        # Signal the main thread that file is ready
-        _download_event.set()
-
     else:
         # We must release references for events we don't care about
         if inRef:
@@ -342,7 +336,7 @@ def main():
             # Poll for the file event (Fast Polling)
             while time.time() - wait_start < 15.0:
                 sdk.lib.EdsGetEvent()
-                if _download_event.is_set():
+                if _download_queue: # Check if file appeared
                     file_ready = True
                     break
 
