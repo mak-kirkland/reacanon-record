@@ -28,8 +28,24 @@ pip3 install numpy scipy ffmpeg-python
 ```
 
 ### Canon SDK Library
-You need the compiled Canon EDSDK shared object (`libEDSDK.so`).
-1. Download the Canon EDSDK (from Canon Developer Community or compatible sources).
+You need the compiled Canon EDSDK binaries for your operating system. These can be obtained from the Canon Developer Community or other compatible sources.
+
+**Windows:**
+
+1. Locate `EDSDK.dll` and `EdsImage.dll` (usually found in the `Dll` folder of the SDK).
+
+2. Place both files inside this script folder.
+
+**macOS:**
+
+1. Locate `EDSDK.framework`.
+
+2. Install it to `/Library/Frameworks/` OR place the `EDSDK.framework` folder inside this script folder.
+
+**Linux:**
+
+1. Locate `libEDSDK.so`.
+
 2. Place `libEDSDK.so` inside this script folder (or in `/usr/local/lib/`).
 
 ---
@@ -41,7 +57,7 @@ To ensure the dynamic pathing works correctly, you **must** use the standard REA
 1. Locate your REAPER resource path (usually `~/.config/REAPER/`).
 2. Navigate to the `Scripts` folder.
 3. Create a folder named exactly `reacanon-record`.
-4. Copy all `.py` files and your `libEDSDK.so` into this folder.
+4. Copy all `.py` files and your OS-specific library files into this folder.
 
 **Target Path Structure:**
 ```text

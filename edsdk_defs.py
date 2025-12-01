@@ -6,24 +6,71 @@ Low-level wrapper for Canon EDSDK.
 Contains all ctypes definitions, constants, and structure mappings.
 
 This isolates the C-interface complexity from the main logic script.
+Auto-detects OS to load .dll (Win), .framework (Mac), or .so (Linux).
 
 Author: Slav Basharov
 Co-author: Michael Kirkland
 """
 
 import sys
+import os
+import platform
 from ctypes import *
+from ctypes.util import find_library
 
 # ==============================================================================
 # CONFIGURATION
 # ==============================================================================
 # Paths where we might find the compiled EDSDK shared library
-LIB_PATHS = [
-    "libEDSDK.so",
-    "./libEDSDK.so",
-    "../libEDSDK.so",
-    "/usr/local/lib/libEDSDK.so"
-]
+def load_edsdk():
+    """Attempts to load EDSDK library cross-platform."""
+    system = platform.system()
+
+    # 1. WINDOWS
+    if system == "Windows":
+        # Requires EDSDK.dll and EdsImage.dll in the same folder or System32
+        lib_name = "EDSDK.dll"
+        # Check current folder first
+        if os.path.exists(lib_name): return CDLL(os.path.abspath(lib_name))
+        if os.path.exists(os.path.join(".", lib_name)): return CDLL(os.path.abspath(os.path.join(".", lib_name)))
+
+        # Try generic find
+        found = find_library("EDSDK")
+        if found: return CDLL(found)
+
+        print(f"Error: Could not find {lib_name}. Please place it in the script folder.")
+
+    # 2. MACOS
+    elif system == "Darwin":
+        # Framework path
+        fw_path = "/Library/Frameworks/EDSDK.framework/EDSDK"
+        if os.path.exists(fw_path):
+            return CDLL(fw_path)
+
+        # Local fallback if user put the framework in the script folder
+        local_fw = os.path.join(os.path.dirname(__file__), "EDSDK.framework", "EDSDK")
+        if os.path.exists(local_fw):
+            return CDLL(local_fw)
+
+        print("Error: Could not find EDSDK.framework in /Library/Frameworks or local folder.")
+
+    # 3. LINUX
+    else:
+        # Linux paths
+        lib_paths = [
+            "libEDSDK.so",
+            "./libEDSDK.so",
+            "../libEDSDK.so",
+            "/usr/local/lib/libEDSDK.so"
+        ]
+        for path in lib_paths:
+            try:
+                return CDLL(path)
+            except OSError:
+                continue
+        print(f"Error: Could not load libEDSDK.so. Checked: {lib_paths}")
+
+    return None
 
 # ==============================================================================
 # CONSTANTS & FLAGS
@@ -90,21 +137,14 @@ class EdsdkWrapper:
     Manages loading the Shared Object (.so) and defining C function prototypes.
     """
     def __init__(self):
-        self.lib = self._load_library()
+        self.lib = load_edsdk()
+        if not self.lib:
+            sys.exit(1)
+
         self._define_prototypes()
         # Helper shortcut for retaining objects (preventing garbage collection)
         self.Retain = getattr(self.lib, "EdsRetain")
         self.Release = getattr(self.lib, "EdsRelease")
-
-    def _load_library(self):
-        """Attempts to load libEDSDK.so from known paths."""
-        for path in LIB_PATHS:
-            try:
-                return CDLL(path)
-            except OSError:
-                continue
-        print(f"❌ Error: Could not load libEDSDK.so. Checked: {LIB_PATHS}")
-        sys.exit(1)
 
     def _define_prototypes(self):
         """Defines input/output types for C functions to prevent segfaults."""

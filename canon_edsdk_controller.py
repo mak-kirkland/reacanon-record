@@ -2,10 +2,11 @@
 """
 canon_edsdk_controller.py
 ---------------------------------
-Headless script to control Canon cameras via EDSDK on Linux.
+Headless script to control Canon cameras via EDSDK.
 Features:
 - Robust recording start/stop with retry logic.
 - Automatic file download via event callbacks.
+- Socket-based IPC for instant Stop/Cancel commands.
 - Real-time progress reporting to stdout for REAPER integration.
 - Clean session shutdown to prevent camera UI hangs.
 - "Zombie" state protection (Force unlock on connect).
@@ -19,6 +20,9 @@ import os
 import time
 import threading
 import signal
+import tempfile
+import socket
+import platform
 from ctypes import byref, c_void_p, c_uint32, c_bool
 
 # Import everything from C wrapper
@@ -27,9 +31,14 @@ from edsdk_defs import *
 # ==============================================================================
 # GLOBALS & STATE
 # ==============================================================================
-RESULT_FILE = "/tmp/camera_result.txt"
+TEMP_DIR = tempfile.gettempdir()
+RESULT_FILE = os.path.join(TEMP_DIR, "camera_result.txt")
+PID_FILE = os.path.join(TEMP_DIR, "camera_script.pid")
+
 _download_queue = []
 _download_event = threading.Event()
+_stop_event = threading.Event()
+_should_download = True
 
 # ==============================================================================
 # CALLBACK HANDLERS
@@ -61,6 +70,39 @@ def on_progress(percent, context, cancel):
     print(f"Progress: {percent}%")
     sys.stdout.flush()
     return 0
+
+# ==============================================================================
+# IPC SERVER
+# ==============================================================================
+def start_ipc_server():
+    """Starts a socket server on a random port to listen for Stop/Cancel."""
+    server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.bind(('127.0.0.1', 0)) # Bind to port 0 (OS assigns free port)
+    port = server.getsockname()[1]
+    server.listen(1)
+
+    def listener():
+        global _should_download
+        try:
+            conn, addr = server.accept()
+            with conn:
+                data = conn.recv(1024).decode('utf-8').strip()
+                if data == "SAVE":
+                    print("Received command: SAVE")
+                    _should_download = True
+                    _stop_event.set()
+                elif data == "CANCEL":
+                    print("Received command: CANCEL")
+                    _should_download = False
+                    _stop_event.set()
+        except Exception as e:
+            print(f"IPC Error: {e}")
+        finally:
+            server.close()
+
+    t = threading.Thread(target=listener, daemon=True)
+    t.start()
+    return port
 
 # ==============================================================================
 # CAMERA SESSION CLASS
@@ -110,7 +152,9 @@ class CameraSession:
         self._force_unlock()
 
         # Register Event Handler
-        sdk.lib.EdsSetObjectEventHandler(self.cam, kEdsObjectEvent_All, on_object_event, None)
+        # Keep a reference to prevent garbage collection of the callback
+        self.handler_ref = on_object_event
+        sdk.lib.EdsSetObjectEventHandler(self.cam, kEdsObjectEvent_All, self.handler_ref, None)
 
     def _force_unlock(self):
         """Attempts to clear UI locks from previous sessions."""
@@ -184,7 +228,8 @@ class CameraSession:
 
         try:
             # Set Progress Callback
-            sdk.lib.EdsSetProgressCallback(stream, on_progress, 2, None)
+            self.progress_ref = on_progress
+            sdk.lib.EdsSetProgressCallback(stream, self.progress_ref, 2, None)
             sdk.lib.EdsDownload(dir_item, info.size, stream)
             sdk.lib.EdsDownloadComplete(dir_item)
 
@@ -220,30 +265,39 @@ def main():
 
     dest_folder, duration = sys.argv[1], float(sys.argv[2])
 
-    # Clean previous state
+    # Cleanup
     if os.path.exists(RESULT_FILE): os.remove(RESULT_FILE)
 
-    # Event for Ctrl+C handling
-    stop_event = threading.Event()
-    should_download = True
+    global _should_download
 
+    # Handle Standard Signals as backup
     def sig_handler(sig, frame):
-        nonlocal should_download
+        global _should_download
         print(f"\nSignal {sig} received. Stopping...")
-        if sig == signal.SIGTERM: should_download = False
-        stop_event.set()
+        if sig == signal.SIGTERM: _should_download = False
+        _stop_event.set()
 
     signal.signal(signal.SIGINT, sig_handler)
     signal.signal(signal.SIGTERM, sig_handler)
 
     try:
+        # Start IPC Server
+        port = start_ipc_server()
+
+        # Write PID and PORT to lock file
+        with open(PID_FILE, 'w') as f:
+            f.write(f"{os.getpid()}\n{port}")
+
+        print(f"IPC Server listening on port {port}")
+        sys.stdout.flush()
+
         with CameraSession() as session:
             session.setup_recording()
             session.start_record()
 
             # Recording Loop (Main Running State)
             start_time = time.time()
-            while not stop_event.is_set():
+            while not _stop_event.is_set():
                 if time.time() - start_time >= duration:
                     print("Duration reached.")
                     break
@@ -275,7 +329,7 @@ def main():
                 # Sleep very briefly to keep CPU usage low but reaction fast
                 time.sleep(0.05)
 
-            if should_download and file_ready:
+            if _should_download and file_ready:
                 session.download_pending_files(dest_folder)
             elif not file_ready:
                 print("Warning: Timed out waiting for file generation.")
@@ -286,7 +340,8 @@ def main():
 
     except Exception as e:
         print(f"Error: {e}")
-        sys.stdout.flush()
+        import traceback
+        traceback.print_exc()
     finally:
         # Force exit to ensure USB driver releases fully (Prevents Zombie processes)
         time.sleep(0.5)
