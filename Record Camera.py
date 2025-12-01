@@ -66,11 +66,8 @@ RECORD_SCRIPT = os.path.join(BASE_DIR, "canon_edsdk_controller.py")
 AUDIO_SYNC_SCRIPT   = os.path.join(BASE_DIR, "audio_sync_detector.py")
 
 # Files
-# We use tempfile to get the correct path for Windows/Mac/Linux
 TEMP_DIR = tempfile.gettempdir()
-PID_FILE    = os.path.join(TEMP_DIR, "camera_script.pid")
-RESULT_FILE = os.path.join(TEMP_DIR, "camera_result.txt")
-LOG_FILE    = os.path.join(TEMP_DIR, "camera_log.txt")
+PID_FILE = os.path.join(TEMP_DIR, "camera_script.pid")
 
 # ==============================================================================
 # 2. REAPER HELPER FUNCTIONS
@@ -199,13 +196,11 @@ def run_synchronization(audio_item, video_item, video_path):
 # 4. CAMERA PROCESS CONTROLLER
 # ==============================================================================
 class CameraProcess:
-    """Manages the background recording process and monitoring loop."""
-    pid = 0
-    port = 0
-    log_cursor = 0
-    timeout_counter = 0
+    """Manages the background recording process."""
+
+    conn = None
+    save_mode = True
     audio_item_ref = None # Store reference to audio item before we deselect it
-    is_cancelling = False # Track cancel state
 
     @staticmethod
     def get_info():
@@ -216,24 +211,15 @@ class CameraProcess:
                     lines = f.read().strip().split('\n')
                     if len(lines) >= 2:
                         return int(lines[0]), int(lines[1])
-                    elif len(lines) == 1:
-                        return int(lines[0]), None
             except: pass
         return None, None
 
     @staticmethod
-    def cleanup():
-        # Clean up all temp files
-        for f in [PID_FILE, RESULT_FILE]:
-            if os.path.exists(f):
-                try: os.remove(f)
-                except: pass
-
-    @staticmethod
     def start():
-        # Clean up stale files first to prevent false "Active" states
-        CameraProcess.cleanup()
-        CameraProcess.is_cancelling = False
+        # Clean up stale file
+        if os.path.exists(PID_FILE):
+            try: os.remove(PID_FILE)
+            except: pass
 
         # Env setup
         env = os.environ.copy()
@@ -245,43 +231,38 @@ class CameraProcess:
              env["LD_LIBRARY_PATH"] = f"{BASE_DIR}:{env.get('LD_LIBRARY_PATH','')}"
 
         try:
-            log_f = open(LOG_FILE, "w")
-
-            # Use DETACHED_PROCESS on Windows to hide console, standard fork elsewhere
-            creation_flags = 0
-            if platform.system() == "Windows":
-                creation_flags = 0x00000008 # DETACHED_PROCESS
+            # Use DETACHED_PROCESS on Windows to hide console
+            creation_flags = 0x00000008 if platform.system() == "Windows" else 0
 
             proc = subprocess.Popen(
                 [PYTHON_EXEC, "-u", RECORD_SCRIPT, get_project_path(), "3600"],
-                cwd=BASE_DIR, env=env, stdout=log_f, stderr=subprocess.STDOUT,
+                cwd=BASE_DIR, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=creation_flags
             )
 
-            # We don't write the PID file here anymore.
-            # We wait for the CHILD to write it (indicating it bound the port).
-
-            console_msg(f"[Camera] Launching (PID {proc.pid})... waiting for connection...")
+            console_msg(f"[Camera] Launching (PID {proc.pid})...")
 
             # Wait for child to initialize and write port (max 5s)
             start_wait = time.time()
             success = False
+            port = 0
             while time.time() - start_wait < 5.0:
                 pid, port = CameraProcess.get_info()
                 if pid and port:
                     success = True
-                    console_msg(f"[Camera] Connected on Port {port}")
                     break
                 time.sleep(0.1)
 
             if not success:
-                console_msg("[Error] Camera script failed to initialize (No Port detected).")
+                console_msg("[Error] Camera script failed to initialize.")
                 try: proc.kill()
                 except: pass
                 return
 
             RPR_Main_OnCommand(1013, 0) # Record REAPER
-            console_msg(f"[Camera] Started (PID {proc.pid})")
+            console_msg(f"[Camera] Started on Port {port}")
+            # Exit immediately to avoid "Terminate Instance" dialog
+            # The controller script runs in background
 
         except Exception as e:
             console_msg(f"Start failed: {e}")
@@ -291,104 +272,106 @@ class CameraProcess:
         pid, port = CameraProcess.get_info()
         if not pid: return
 
-        # 1. Stop REAPER
+        # 1. Stop REAPER Audio Immediately
         RPR_Main_OnCommand(1016, 0)
 
-        # 2. Capture Audio Item (It's selected right now!)
+        # 2. Capture Audio Item
         CameraProcess.audio_item_ref = get_last_audio_item()
-        CameraProcess.is_cancelling = not save
+        CameraProcess.save_mode = save
 
-        # 3. Send Command via Socket (Robust IPC)
+        # 3. Send Command via Socket
         msg = "SAVE" if save else "CANCEL"
         if save: console_msg("[Camera] Stopping & Downloading...")
         else: console_msg("[Camera] Cancelling...")
 
         try:
-            if port:
-                with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-                    s.settimeout(2.0)
-                    s.connect(('127.0.0.1', port))
-                    s.sendall(msg.encode('utf-8'))
-            else:
-                # Fallback if port wasn't written for some reason
-                console_msg("[Camera] Warning: No port found. Using force kill.")
-                os.kill(pid, signal.SIGTERM)
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            # Disable buffering delays
+            s.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+            s.connect(('127.0.0.1', port))
+            s.sendall(msg.encode('utf-8'))
+
+            # Switch to non-blocking mode for defer loop
+            s.setblocking(0)
+            CameraProcess.conn = s
+
+            # 4. Start Non-Blocking Monitor Loop
+            # This allows REAPER GUI to refresh while downloading
+            RPR_defer("CameraProcess.monitor_download_loop()")
+
         except Exception as e:
-            console_msg(f"[Camera] IPC Error: {e}")
+            console_msg(f"[Camera] Error: {e}")
             # Ensure it dies if socket fails
             try: os.kill(pid, signal.SIGTERM)
             except: pass
-
-        # 4. Start Monitoring Loop
-        CameraProcess.pid = pid
-        CameraProcess.log_cursor = 0
-        CameraProcess.monitor_loop()
+            if os.path.exists(PID_FILE):
+                try: os.remove(PID_FILE)
+                except: pass
 
     @staticmethod
-    def finish_import():
-        """Helper: imports result file if it exists and performs sync."""
-        if not os.path.exists(RESULT_FILE): return
+    def monitor_download_loop():
+        """Reads socket logs without blocking the REAPER UI."""
+        if not CameraProcess.conn: return
 
-        with open(RESULT_FILE, 'r') as f: vid_path = f.read().strip()
+        try:
+            # Read all available data in chunks
+            while True:
+                try:
+                    data = CameraProcess.conn.recv(4096)
+                    if not data:
+                        # Socket closed
+                        CameraProcess.cleanup()
+                        return
 
-        # Import Video
+                    text = data.decode('utf-8', errors='ignore')
+                    for line in text.split('\n'):
+                        line = line.strip()
+                        if not line: continue
+
+                        if line.startswith("LOG:"):
+                            RPR_ShowConsoleMsg(line[4:] + "\n")
+                        elif line.startswith("RESULT:"):
+                            path = line[7:].strip()
+                            if CameraProcess.save_mode:
+                                CameraProcess.finish_import(path, CameraProcess.audio_item_ref)
+
+                            CameraProcess.cleanup()
+                            return
+                except BlockingIOError:
+                    # No more data in buffer currently, yield to REAPER
+                    break
+
+        except Exception as e:
+            console_msg(f"[Camera] Disconnected: {e}")
+            CameraProcess.cleanup()
+            return
+
+        # Keep running loop in next cycle
+        RPR_defer("CameraProcess.monitor_download_loop()")
+
+    @staticmethod
+    def cleanup():
+        if CameraProcess.conn:
+            try: CameraProcess.conn.close()
+            except: pass
+        CameraProcess.conn = None
+
+        # Cleanup file
+        if os.path.exists(PID_FILE):
+            try: os.remove(PID_FILE)
+            except: pass
+
+    @staticmethod
+    def finish_import(vid_path, audio_item):
+        if not os.path.exists(vid_path): return
+
         vid_item = insert_video(vid_path)
         if vid_item:
             console_msg(f"[Camera] Imported.")
-
-            # Perform Sync if we have the audio item
-            if CameraProcess.audio_item_ref:
-                run_synchronization(CameraProcess.audio_item_ref, vid_item, vid_path)
+            if audio_item:
+                run_synchronization(audio_item, vid_item, vid_path)
             else:
                 console_msg("[Sync] Skipped: No audio recording found.")
-
-            # Move cursor to end of recording
-            v_end = RPR_GetMediaItemInfo_Value(vid_item, "D_POSITION") + \
-                    RPR_GetMediaItemInfo_Value(vid_item, "D_LENGTH")
-            RPR_SetEditCurPos(v_end, True, False)
-
-    @staticmethod
-    def monitor_loop():
-        """Recursive loop to check process status and stream logs."""
-        # --- Stream Logs ---
-        if os.path.exists(LOG_FILE):
-            try:
-                with open(LOG_FILE, 'r') as f:
-                    f.seek(CameraProcess.log_cursor)
-                    data = f.read()
-                    if data:
-                        RPR_ShowConsoleMsg(data)
-                        CameraProcess.log_cursor = f.tell()
-                        CameraProcess.timeout_counter = 0
-
-                        # Trust "Done." to exit immediately (Avoids Zombie process wait)
-                        if "Done." in data:
-                            if not CameraProcess.is_cancelling: CameraProcess.finish_import()
-                            else: console_msg("[Camera] Cancelled successfully.")
-                            CameraProcess.cleanup()
-                            return # DONE
-            except: pass
-
-        # --- Check Process ---
-        try:
-            os.kill(CameraProcess.pid, 0)
-        except OSError:
-            # Process died unexpectedly
-            if not CameraProcess.is_cancelling: CameraProcess.finish_import()
-            else: console_msg("[Camera] Cancelled successfully.")
-            CameraProcess.cleanup()
-            return
-
-        # --- Timeout ---
-        CameraProcess.timeout_counter += 1
-        if CameraProcess.timeout_counter > 900: # ~30s
-            console_msg("\n[Camera] Timeout (Force Killing).")
-            try: os.kill(CameraProcess.pid, signal.SIGTERM)
-            except: pass
-            CameraProcess.cleanup()
-            return
-
-        RPR_defer("CameraProcess.monitor_loop()")
 
 # ==============================================================================
 # 5. ENTRY POINT
@@ -399,13 +382,11 @@ def main():
     # Check if actually running
     is_running = False
     if pid:
-        # Check if actually running
         try:
             os.kill(pid, 0)
             is_running = True
         except OSError:
-            # Stale PID file
-            CameraProcess.cleanup()
+            pass # Stale file
 
     if is_running:
         choice = RPR_ShowMessageBox("Recording active.\n\nYes = Save & Sync\nNo = Cancel", "Camera", 3)

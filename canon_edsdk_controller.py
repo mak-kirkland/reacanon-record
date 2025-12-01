@@ -32,13 +32,28 @@ from edsdk_defs import *
 # GLOBALS & STATE
 # ==============================================================================
 TEMP_DIR = tempfile.gettempdir()
-RESULT_FILE = os.path.join(TEMP_DIR, "camera_result.txt")
 PID_FILE = os.path.join(TEMP_DIR, "camera_script.pid")
 
 _download_queue = []
 _download_event = threading.Event()
 _stop_event = threading.Event()
 _should_download = True
+_client_socket = None
+_socket_lock = threading.Lock()
+
+def log(msg):
+    """Sends log messages back to REAPER via socket if connected."""
+    global _client_socket
+    # Always print to stdout (helpful for debugging if running manually)
+    print(msg)
+    sys.stdout.flush()
+
+    with _socket_lock:
+        if _client_socket:
+            try:
+                _client_socket.sendall(f"LOG:{msg}\n".encode('utf-8'))
+            except:
+                pass # If client disconnected, just ignore
 
 # ==============================================================================
 # CALLBACK HANDLERS
@@ -47,8 +62,7 @@ _should_download = True
 def on_object_event(event, inRef, context):
     """Called by camera when a file is created (kEdsObjectEvent_DirItemCreated)."""
     if event == kEdsObjectEvent_DirItemCreated:
-        print("New file detected on camera.")
-        sys.stdout.flush()
+        log("New file detected on camera.")
 
         # Retain reference so it doesn't vanish before we download it
         if inRef:
@@ -67,8 +81,7 @@ def on_object_event(event, inRef, context):
 @EdsProgressCallback
 def on_progress(percent, context, cancel):
     """Called during file download to report progress."""
-    print(f"Progress: {percent}%")
-    sys.stdout.flush()
+    log(f"Progress: {percent}%")
     return 0
 
 # ==============================================================================
@@ -82,23 +95,33 @@ def start_ipc_server():
     server.listen(1)
 
     def listener():
-        global _should_download
-        try:
-            conn, addr = server.accept()
-            with conn:
+        global _should_download, _client_socket
+        # Wait for a connection (Blocking is fine in this thread)
+        while not _stop_event.is_set():
+            try:
+                conn, addr = server.accept()
+
+                # Disable Nagle's algorithm to ensure logs are sent immediately
+                conn.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
+                with _socket_lock:
+                    _client_socket = conn
+
+                # Receive command
                 data = conn.recv(1024).decode('utf-8').strip()
-                if data == "SAVE":
-                    print("Received command: SAVE")
+                if "SAVE" in data:
+                    log("Received command: SAVE")
                     _should_download = True
                     _stop_event.set()
-                elif data == "CANCEL":
-                    print("Received command: CANCEL")
+                elif "CANCEL" in data:
+                    log("Received command: CANCEL")
                     _should_download = False
                     _stop_event.set()
-        except Exception as e:
-            print(f"IPC Error: {e}")
-        finally:
-            server.close()
+
+                # We keep the connection open to stream logs back
+                # The main thread will use _client_socket to send RESULT
+            except Exception as e:
+                print(f"IPC Error: {e}")
 
     t = threading.Thread(target=listener, daemon=True)
     t.start()
@@ -176,7 +199,7 @@ class CameraSession:
                 sdk.lib.EdsGetEvent() # Pump events
                 time.sleep(0.1 * (i + 1)) # Backoff: 0.1s, 0.2s, 0.3s...
             else:
-                print(f"Warning: {desc} error {hex(err)}")
+                log(f"Warning: {desc} error {hex(err)}")
                 break
 
         if err != EDS_ERR_OK and desc == "Start Record":
@@ -194,13 +217,11 @@ class CameraSession:
     def start_record(self):
         """Sends Record Start command with Retry logic."""
         self._retry_action(kEdsPropID_Record, EDS_RECORD_START, 5, "Start Record")
-        print("Recording started.")
-        sys.stdout.flush()
+        log("Recording started.")
 
     def stop_record(self):
         """Sends Record Stop command with Retry logic."""
-        print("Stopping recording...")
-        sys.stdout.flush()
+        log("Stopping recording...")
         # Check specifically for "Not Ready" error
         self._retry_action(kEdsPropID_Record, EDS_RECORD_STOP, 10, "Stop Record")
 
@@ -218,12 +239,11 @@ class CameraSession:
         filename = info.szFileName.decode("utf-8")
         save_path = os.path.join(dest_dir, filename)
 
-        print(f"Downloading {filename} ({info.size} bytes)...")
-        sys.stdout.flush()
+        log(f"Downloading {filename} ({info.size} bytes)...")
 
         stream = c_void_p()
         if sdk.lib.EdsCreateFileStream(save_path.encode("utf-8"), 1, 2, byref(stream)) != 0:
-            print("File create failed.")
+            log("File create failed.")
             return
 
         try:
@@ -233,18 +253,20 @@ class CameraSession:
             sdk.lib.EdsDownload(dir_item, info.size, stream)
             sdk.lib.EdsDownloadComplete(dir_item)
 
-            print(f"Saved: {save_path}")
-            sys.stdout.flush()
+            log(f"Saved: {save_path}")
 
-            # Notify REAPER
-            with open(RESULT_FILE, "w") as f: f.write(save_path)
+            # Notify REAPER via Socket
+            with _socket_lock:
+                if _client_socket:
+                    try:
+                        _client_socket.sendall(f"RESULT:{save_path}\n".encode('utf-8'))
+                    except: pass
         finally:
             sdk.lib.EdsRelease(stream)
 
     def close(self):
         """Clean shutdown to release Camera UI."""
-        print("Cleaning up session...")
-        sys.stdout.flush()
+        log("Cleaning up session...")
         if self.is_connected:
             # Crucial: Force UI Unlock
             self._force_unlock()
@@ -252,8 +274,11 @@ class CameraSession:
             sdk.lib.EdsCloseSession(self.cam)
             sdk.lib.EdsRelease(self.cam)
         sdk.lib.EdsTerminateSDK()
-        print("Done.")
-        sys.stdout.flush()
+        log("Done.")
+
+        with _socket_lock:
+            if _client_socket:
+                _client_socket.close()
 
 # ==============================================================================
 # MAIN EXECUTION
@@ -264,9 +289,6 @@ def main():
         return
 
     dest_folder, duration = sys.argv[1], float(sys.argv[2])
-
-    # Cleanup
-    if os.path.exists(RESULT_FILE): os.remove(RESULT_FILE)
 
     global _should_download
 
@@ -284,7 +306,7 @@ def main():
         # Start IPC Server
         port = start_ipc_server()
 
-        # Write PID and PORT to lock file
+        # Write PID and PORT to file for REAPER discovery
         with open(PID_FILE, 'w') as f:
             f.write(f"{os.getpid()}\n{port}")
 
@@ -299,7 +321,7 @@ def main():
             start_time = time.time()
             while not _stop_event.is_set():
                 if time.time() - start_time >= duration:
-                    print("Duration reached.")
+                    log("Duration reached.")
                     break
 
                 # Keep the SDK event queue moving
@@ -313,8 +335,7 @@ def main():
 
             # CRITICAL: Always wait for file generation (buffer flush)
             # even if we plan to discard it. Prevents camera hangs.
-            print("Waiting for camera buffer flush...")
-            sys.stdout.flush()
+            log("Waiting for camera buffer flush...")
 
             wait_start = time.time()
             file_ready = False
@@ -332,17 +353,21 @@ def main():
             if _should_download and file_ready:
                 session.download_pending_files(dest_folder)
             elif not file_ready:
-                print("Warning: Timed out waiting for file generation.")
+                log("Warning: Timed out waiting for file generation.")
             else:
-                print("Skipping download (Cancelled).")
+                log("Skipping download (Cancelled).")
                 # Release items we aren't downloading
                 for item in _download_queue: sdk.lib.EdsRelease(item)
 
     except Exception as e:
-        print(f"Error: {e}")
+        log(f"Error: {e}")
         import traceback
         traceback.print_exc()
     finally:
+        # Remove discovery file
+        try: os.remove(PID_FILE)
+        except: pass
+
         # Force exit to ensure USB driver releases fully (Prevents Zombie processes)
         time.sleep(0.5)
         sys.exit(0)
