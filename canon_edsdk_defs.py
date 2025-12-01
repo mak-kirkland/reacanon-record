@@ -181,6 +181,7 @@ class EdsdkWrapper:
         proto("EdsDownloadComplete", c_int32, [c_void_p])
         proto("EdsGetEvent", c_int32, [])
         proto("EdsSetProgressCallback", c_int32, [c_void_p, c_void_p, c_int32, c_void_p])
+        proto("EdsDeleteDirectoryItem", c_int32, [c_void_p])
 
 # Singleton instance for import
 sdk = EdsdkWrapper()

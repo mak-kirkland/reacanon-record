@@ -10,6 +10,7 @@ Features:
 - Real-time progress reporting to stdout.
 - Clean session shutdown to prevent camera UI hangs.
 - "Zombie" state protection (Force unlock on connect).
+- Verify & delete: Checks size and runs FFmpeg integrity check before deleting from card.
 
 Author: Slav Basharov
 Co-author: Michael Kirkland
@@ -21,6 +22,8 @@ import time
 import threading
 import signal
 import tempfile
+import shutil
+import subprocess
 from ctypes import byref, c_void_p, c_uint32, c_bool
 
 # Import everything from C wrapper
@@ -61,6 +64,35 @@ def send_result(path):
             f.write(f"RESULT:{path}\n")
     except Exception:
         pass
+
+def verify_video_integrity(filepath):
+    """
+    Returns True if the video file is valid.
+    Uses FFmpeg to check for container errors without decoding the whole stream.
+    """
+    ffmpeg_bin = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+
+    # 1. Check if file exists and has size
+    if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
+        return False
+
+    # 2. Run FFmpeg error check
+    # -v error: Only print errors
+    # -i ...: Input file
+    # -f null -: Output to nowhere
+    try:
+        cmd = [ffmpeg_bin, "-v", "error", "-i", filepath, "-f", "null", "-"]
+        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+        # If return code is 0, the file structure is valid
+        if result.returncode == 0:
+            return True
+        else:
+            log(f"Integrity Check Failed: {result.stderr.decode()}")
+            return False
+    except Exception as e:
+        log(f"Verification Error: {e}")
+        return False
 
 # ==============================================================================
 # CALLBACK HANDLERS
@@ -214,11 +246,36 @@ class CameraSession:
             sdk.lib.EdsDownload(dir_item, info.size, stream)
             sdk.lib.EdsDownloadComplete(dir_item)
 
-            log(f"Saved: {save_path}")
-            send_result(save_path)
-
         finally:
             sdk.lib.EdsRelease(stream)
+
+        # --- ROBUST VERIFICATION LOGIC ---
+
+        # 1. Size Verification
+        local_size = os.path.getsize(save_path)
+        if local_size != info.size:
+            log(f"CRITICAL: Size mismatch! Camera: {info.size}, Local: {local_size}")
+            # Do NOT delete from camera. Do NOT send result.
+            return
+
+        # 2. Content Verification (FFmpeg)
+        log("Verifying file integrity...")
+        if verify_video_integrity(save_path):
+            log(f"Verified. Deleting from card...")
+
+            # 3. Safe Delete
+            err = sdk.lib.EdsDeleteDirectoryItem(dir_item)
+            if err == EDS_ERR_OK:
+                log("File deleted from camera.")
+            else:
+                log(f"Warning: Delete failed (Err {hex(err)})")
+
+            # Only send result if we are confident the file is good
+            log(f"Saved: {save_path}")
+            send_result(save_path)
+        else:
+            log("CRITICAL: File corrupted. NOT deleting from camera.")
+            # Do NOT send result.
 
     def close(self):
         """Clean shutdown to release Camera UI."""
