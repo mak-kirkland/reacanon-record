@@ -21,6 +21,7 @@ import shutil
 import tempfile
 import platform
 import time
+import ctypes
 from reaper_python import *
 
 # ==============================================================================
@@ -158,6 +159,16 @@ def insert_video(filepath, track_name="Video"):
         RPR_MoveMediaItemToTrack(item, trk)
     return item
 
+def check_ffmpeg_installed():
+    """Checks if ffmpeg is available for sync."""
+    # Check PATH
+    if shutil.which("ffmpeg"): return True
+
+    # Check Script Dir (Using BASE_DIR instead of __file__)
+    if os.path.exists(os.path.join(BASE_DIR, "ffmpeg.exe")): return True
+
+    return False
+
 def get_last_audio_item():
     """
     Heuristic: Finds the selected audio item.
@@ -195,9 +206,15 @@ def detect_offset(ref_path, target_path):
 
 def run_synchronization(audio_item, video_item, video_path):
     """Aligns video item to match audio item based on clap."""
+
+    # 1. Check dependency
+    if not check_ffmpeg_installed():
+        console_msg("[Sync] Warning: FFmpeg not found. Install FFmpeg to enable auto-sync.")
+        return
+
     console_msg("--- Starting Auto-Sync ---")
 
-    # 1. Get Audio File
+    # 2. Get Audio File
     audio_path = get_source_file(audio_item)
     if not audio_path or not os.path.exists(audio_path):
         console_msg("Reference audio file not found.")
@@ -205,18 +222,16 @@ def run_synchronization(audio_item, video_item, video_path):
 
     console_msg(f"Comparing:\nRef: {os.path.basename(audio_path)}\nTgt: {os.path.basename(video_path)}")
 
-    # 2. Calculate Offset
-    # offset is positive if Target is LATE relative to Ref
+    # 3. Calculate Offset
     offset = detect_offset(audio_path, video_path)
 
     if offset is None:
-        console_msg("Sync failed.")
+        console_msg("Sync failed (Could not detect clap match).")
         return
 
     console_msg(f"Calculated Offset: {offset:.4f}s")
 
-    # 3. Move Video Item
-    # If target is late (+0.5s), we must move it LEFT (-0.5s) to align.
+    # 4. Move Video Item
     audio_pos = RPR_GetMediaItemInfo_Value(audio_item, "D_POSITION")
     new_video_pos = audio_pos - offset
 
@@ -417,23 +432,79 @@ class CameraProcess:
 # ==============================================================================
 # 5. ENTRY POINT
 # ==============================================================================
+def is_process_running_win(pid):
+    """
+    Checks if a process is running using Windows Kernel32 API directly.
+    Bypasses os.kill/tasklist to avoid SystemError/WinError 6 on Python 3.13+.
+    """
+    try:
+        # Constants from Windows API
+        PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
+        SYNCHRONIZE = 0x00100000
+        STILL_ACTIVE = 259
+
+        # Open the process with limited rights (enough to query status)
+        h_process = ctypes.windll.kernel32.OpenProcess(
+            PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE,
+            False, pid
+        )
+
+        if not h_process:
+            return False
+
+        # Get exit code
+        exit_code = ctypes.c_ulong()
+        success = ctypes.windll.kernel32.GetExitCodeProcess(h_process, ctypes.byref(exit_code))
+        ctypes.windll.kernel32.CloseHandle(h_process)
+
+        if not success:
+            return False
+
+        # If exit code is 259 (STILL_ACTIVE), it's running
+        return exit_code.value == STILL_ACTIVE
+
+    except Exception:
+        return False
+
 def main():
     pid = CameraProcess.get_pid()
-
-    # Check if actually running
     is_running = False
-    if pid:
-        try:
-            os.kill(pid, 0)
-            is_running = True
-        except OSError:
-            pass # Stale file
 
+    # 1. Determine if running
+    if pid:
+        if platform.system() == "Windows":
+            is_running = is_process_running_win(pid)
+        else:
+            # Fallback for Mac/Linux
+            try:
+                os.kill(pid, 0)
+                is_running = True
+            except OSError:
+                is_running = False
+
+    # 2. Logic
     if is_running:
+        # Process is alive: Show Stop/Cancel Dialog
         choice = RPR_ShowMessageBox("Recording active.\n\nYes = Save & Sync\nNo = Cancel", "Camera", 3)
-        if choice == 6: CameraProcess.stop(save=True)
-        elif choice == 7: CameraProcess.stop(save=False)
+
+        if choice == 6: # Yes
+            CameraProcess.stop(save=True)
+        else: # No (7), Cancel (2), or Closed (-1) -> Stop without saving
+            CameraProcess.stop(save=False)
+
     else:
+        # Process is dead or not found
+        if pid:
+            # If a PID file existed but process was dead, check logs to see why it crashed
+            console_msg(f"[Warning] Previous process {pid} not found (Crashed?). Starting new session...")
+            if os.path.exists(LOG_FILE):
+                try:
+                    with open(LOG_FILE, 'r') as f:
+                        lines = f.readlines()
+                        if lines:
+                            console_msg(f"--- Last Log Lines ---\n{''.join(lines[-3:])}----------------------")
+                except: pass
+
         CameraProcess.start()
 
 if __name__ == "__main__":

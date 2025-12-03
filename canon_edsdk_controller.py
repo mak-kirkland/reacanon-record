@@ -68,31 +68,55 @@ def send_result(path):
 
 def verify_video_integrity(filepath):
     """
-    Returns True if the video file is valid.
-    Uses FFmpeg to check for container errors without decoding the whole stream.
+    Checks for video corruption using FFmpeg.
+    Assumes file size check has already passed.
+
+    Returns:
+        True  = File is good (or check skipped). Safe to delete from card.
+        False = File is corrupted or check failed. Keep on card.
     """
-    ffmpeg_bin = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+    # 1. Locate FFmpeg (System PATH or Script Folder)
+    ffmpeg_bin = shutil.which("ffmpeg")
+    if not ffmpeg_bin:
+        script_dir = os.path.dirname(os.path.abspath(__file__))
+        local_ffmpeg = os.path.join(script_dir, "ffmpeg.exe")
+        if os.path.exists(local_ffmpeg):
+            ffmpeg_bin = local_ffmpeg
 
-    # 1. Check if file exists and has size
-    if not os.path.exists(filepath) or os.path.getsize(filepath) == 0:
-        return False
+    # 2. If FFmpeg is missing, we rely solely on the size check (already passed)
+    if not ffmpeg_bin:
+        log("Warning: FFmpeg not found. Integrity check limited to file size.")
+        return True
 
-    # 2. Run FFmpeg error check
-    # -v error: Only print errors
-    # -i ...: Input file
-    # -f null -: Output to nowhere
+    # 3. Run FFmpeg to check for stream errors
     try:
+        # -v error: Only print errors
+        # -i ...: Input file
+        # -f null -: Output to nowhere
         cmd = [ffmpeg_bin, "-v", "error", "-i", filepath, "-f", "null", "-"]
-        result = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
-        # If return code is 0, the file structure is valid
+        # Suppress console window on Windows
+        startupinfo = None
+        if os.name == 'nt':
+            startupinfo = subprocess.STARTUPINFO()
+            startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+
+        result = subprocess.run(
+            cmd,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            startupinfo=startupinfo
+        )
+
         if result.returncode == 0:
             return True
         else:
-            log(f"Integrity Check Failed: {result.stderr.decode()}")
+            log(f"Integrity Check Failed (Corruption detected): {result.stderr.decode()}")
             return False
+
     except Exception as e:
-        log(f"Verification Error: {e}")
+        # If the check itself crashes, we should NOT delete the file to be safe.
+        log(f"Verification process error: {e}")
         return False
 
 # ==============================================================================
