@@ -52,6 +52,22 @@ You need the compiled Canon EDSDK binaries for your operating system. These can 
 
 ## 2. Installation
 
+### Enabling Python in REAPER
+This script relies on REAPER's internal Python environment. You must configure REAPER to point to your installed Python library.
+
+1. Open REAPER and go to **Options > Preferences**.
+2. Scroll down to **Plug-ins > ReaScript**.
+3. Check the box **Enable Python for use with ReaScript**.
+4. In the **Custom path to Python dll directory** box, enter the folder where Python is installed (e.g., `C:\Python312\` or `/usr/local/bin/`).
+5. **Important:** In the **Force ReaScript to use specific Python .dll** box, you must enter the exact name of the DLL file for your version.
+   - Example (Windows): `python312.dll` or `python310.dll`
+   - Example (macOS): `libpython3.12.dylib`
+6. Click **OK** and restart REAPER.
+
+*Note: If you are using the Windows Store version of Python, these DLLs are often protected. It is highly recommended to install the official release from python.org.*
+
+### Installing ReaCanon Record
+
 To ensure the dynamic pathing works correctly, you **must** use the standard REAPER directory structure.
 
 1. Locate your REAPER resource path (usually `~/.config/REAPER/`).
