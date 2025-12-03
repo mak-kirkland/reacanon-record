@@ -191,7 +191,7 @@ def run_synchronization(audio_item, video_item, video_path):
     # 1. Get Audio File
     audio_path = get_source_file(audio_item)
     if not audio_path or not os.path.exists(audio_path):
-        console_msg("❌ Reference audio file not found.")
+        console_msg("Reference audio file not found.")
         return
 
     console_msg(f"Comparing:\nRef: {os.path.basename(audio_path)}\nTgt: {os.path.basename(video_path)}")
@@ -201,7 +201,7 @@ def run_synchronization(audio_item, video_item, video_path):
     offset = detect_offset(audio_path, video_path)
 
     if offset is None:
-        console_msg("❌ Sync failed.")
+        console_msg("Sync failed.")
         return
 
     console_msg(f"Calculated Offset: {offset:.4f}s")
@@ -214,7 +214,7 @@ def run_synchronization(audio_item, video_item, video_path):
     RPR_SetMediaItemInfo_Value(video_item, "D_POSITION", new_video_pos)
     RPR_UpdateArrange()
 
-    console_msg(f"✅ Synced! Video moved to {new_video_pos:.3f}s")
+    console_msg(f"Synced! Video moved to {new_video_pos:.3f}s")
 
 # ==============================================================================
 # 4. CAMERA PROCESS CONTROLLER
