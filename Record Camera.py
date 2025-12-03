@@ -33,6 +33,15 @@ from reaper_python import *
 
 if platform.system() == "Windows":
     PYTHON_EXEC = shutil.which("python") or shutil.which("python3")
+elif platform.system() == "Darwin":
+    CANDIDATES = [
+        "/opt/homebrew/bin/python3.12",
+        "/opt/homebrew/bin/python3.13",
+        "/usr/local/bin/python3",
+        shutil.which("python3"),
+        shutil.which("python"),
+    ]
+    PYTHON_EXEC = next((p for p in CANDIDATES if p and os.path.exists(p)), None)
 else:
     PYTHON_EXEC = shutil.which("python3") or shutil.which("python")
 
