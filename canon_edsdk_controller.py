@@ -151,7 +151,8 @@ def on_object_event(event, inRef, context):
 @EdsProgressCallback
 def on_progress(percent, context, cancel):
     """Called during file download to report progress."""
-    log(f"Download Progress: {percent}%")
+    if percent % 10 == 0:
+        log(f"Download Progress: {percent}%")
     return 0
 
 # ==============================================================================
