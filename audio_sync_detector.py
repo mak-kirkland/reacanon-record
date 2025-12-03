@@ -18,13 +18,22 @@ Co-author: Michael Kirkland
 
 import sys
 import shutil
+import os
 import numpy as np
 import ffmpeg
 from scipy import signal
 
 # --- CONFIGURATION ---
 # Use shutil to find ffmpeg in the system PATH (fallback to /usr/bin/ffmpeg)
-FFMPEG_BINARY = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+# We also check the script directory specifically for portable installs.
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+LOCAL_FFMPEG = os.path.join(SCRIPT_DIR, "ffmpeg.exe" if os.name == 'nt' else "ffmpeg")
+
+if os.path.exists(LOCAL_FFMPEG):
+    FFMPEG_BINARY = LOCAL_FFMPEG
+else:
+    FFMPEG_BINARY = shutil.which("ffmpeg") or "/usr/bin/ffmpeg"
+
 SAMPLE_RATE = 48000
 SCAN_DURATION = 60.0    # Scan duration in seconds
 # Frequencies below this will be ignored (removes wind/handling rumble)
