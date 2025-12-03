@@ -65,8 +65,26 @@ if PYTHON_EXEC and "WindowsApps" in PYTHON_EXEC and platform.system() == "Window
             break
 
 if not PYTHON_EXEC:
-    RPR_ShowMessageBox("Could not find Python! Please install Python 3.", "Error", 0)
+    RPR_ShowMessageBox("Could not find Python! Please install Python 3.", "ERROR", 0)
     sys.exit(1)
+
+# ==============================================================================
+# 2. LOGGING & HELPERS
+# ==============================================================================
+def log(msg, context="System", level="INFO"):
+    """
+    Consistent logging format.
+    Args:
+        msg (str): The message to log.
+        context (str): The system component (e.g., "System", "Camera", "Sync").
+        level (str): Log level ("INFO", "ERROR", "WARNING"). Defaults to "INFO".
+    """
+    # Simplified format string
+    prefix = f"[{context}]"
+    if level != "INFO":
+        prefix += f" [{level}]"
+
+    RPR_ShowConsoleMsg(f"{prefix} {msg}\n")
 
 # --- DYNAMIC PATH SETUP ---
 # REAPER does not support __file__. We must construct the path relative
@@ -79,10 +97,11 @@ try:
 
     # Verify it exists
     if not os.path.exists(BASE_DIR):
-        RPR_ShowConsoleMsg(
-            f"\n[FATAL ERROR] Script folder not found!\n"
-            f"The script expects to be located at:\n{BASE_DIR}\n\n"
-            f"Please create this folder and move the python scripts there.\n"
+        log(
+            f"FATAL: Script folder not found!\n"
+            f"Expected location: {BASE_DIR}\n"
+            f"Please create this folder and move the python scripts there.",
+            "System", "ERROR"
         )
         # Exit immediately prevents the rest of the script from crashing with NameErrors
         sys.exit(1)
@@ -92,7 +111,7 @@ except Exception as e:
     if isinstance(e, SystemExit):
         raise
 
-    RPR_ShowConsoleMsg(f"\n[Error] Failed to determine script path: {e}\n")
+    log(f"Failed to determine script path: {e}", "System", "ERROR")
     sys.exit(1)
 
 RECORD_SCRIPT = os.path.join(BASE_DIR, "canon_edsdk_controller.py")
@@ -102,12 +121,6 @@ AUDIO_SYNC_SCRIPT   = os.path.join(BASE_DIR, "audio_sync_detector.py")
 TEMP_DIR = tempfile.gettempdir()
 PID_FILE = os.path.join(TEMP_DIR, "canon_edsdk_controller.pid")
 LOG_FILE = os.path.join(TEMP_DIR, "canon_edsdk_controller.log")
-
-# ==============================================================================
-# 2. REAPER HELPER FUNCTIONS
-# ==============================================================================
-def console_msg(m):
-    RPR_ShowConsoleMsg(str(m) + "\n")
 
 def get_project_path():
     path = RPR_GetProjectPath("", 512)[0]
@@ -198,10 +211,12 @@ def detect_offset(ref_path, target_path):
         if res.returncode == 0:
             return float(res.stdout.strip())
         else:
-            console_msg(f"[Sync Error] {res.stderr}")
+            # Child script usually prints to stderr
+            err_msg = res.stderr.strip() or "Unknown error"
+            log(err_msg, "Sync", "ERROR")
             return None
     except Exception as e:
-        console_msg(f"[Sync] Exception: {e}")
+        log(f"Exception: {e}", "Sync", "ERROR")
         return None
 
 def run_synchronization(audio_item, video_item, video_path):
@@ -209,27 +224,24 @@ def run_synchronization(audio_item, video_item, video_path):
 
     # 1. Check dependency
     if not check_ffmpeg_installed():
-        console_msg("[Sync] Warning: FFmpeg not found. Install FFmpeg to enable auto-sync.")
+        log("FFmpeg not found. Install FFmpeg to enable auto-sync.", "Sync", "WARNING")
         return
 
-    console_msg("--- Starting Auto-Sync ---")
+    log("Starting Auto-Sync...", "Sync")
+    log(f"Comparing: '{get_source_file(audio_item)}' to '{os.path.basename(video_path)}'", "Sync")
 
     # 2. Get Audio File
     audio_path = get_source_file(audio_item)
     if not audio_path or not os.path.exists(audio_path):
-        console_msg("Reference audio file not found.")
+        log("Reference audio file not found on selected track.", "Sync", "ERROR")
         return
-
-    console_msg(f"Comparing:\nRef: {os.path.basename(audio_path)}\nTgt: {os.path.basename(video_path)}")
 
     # 3. Calculate Offset
     offset = detect_offset(audio_path, video_path)
 
     if offset is None:
-        console_msg("Sync failed (Could not detect clap match).")
+        log("Failed to detect clap match.", "Sync", "WARNING")
         return
-
-    console_msg(f"Calculated Offset: {offset:.4f}s")
 
     # 4. Move Video Item
     audio_pos = RPR_GetMediaItemInfo_Value(audio_item, "D_POSITION")
@@ -238,7 +250,7 @@ def run_synchronization(audio_item, video_item, video_path):
     RPR_SetMediaItemInfo_Value(video_item, "D_POSITION", new_video_pos)
     RPR_UpdateArrange()
 
-    console_msg(f"Synced! Video moved to {new_video_pos:.3f}s")
+    log(f"Success! Video moved to {new_video_pos:.3f}s (Offset: {offset:.4f}s)", "Sync")
 
 # ==============================================================================
 # 4. CAMERA PROCESS CONTROLLER
@@ -282,7 +294,7 @@ class CameraProcess:
              env["LD_LIBRARY_PATH"] = f"{BASE_DIR}:{env.get('LD_LIBRARY_PATH','')}"
 
         try:
-            console_msg(f"Using Python: {PYTHON_EXEC}")
+            log(f"Using Python: {PYTHON_EXEC}", "System")
 
             # Use DETACHED_PROCESS on Windows to hide console
             creation_flags = 0x00000008 if platform.system() == "Windows" else 0
@@ -294,7 +306,7 @@ class CameraProcess:
                 creationflags=creation_flags
             )
 
-            console_msg(f"[Camera] Launching (PID {proc.pid})...")
+            log(f"Launching camera process (PID {proc.pid})...", "System")
 
             # Wait for child to initialize and write PID (max 5s)
             start_wait = time.time()
@@ -304,38 +316,37 @@ class CameraProcess:
                 if proc.poll() is not None:
                     break
 
-                pid = CameraProcess.get_pid()
-                if pid:
+                if CameraProcess.get_pid():
                     success = True
                     break
                 time.sleep(0.1)
 
             if not success:
                 # If we are here, process either died or timed out
-                console_msg("[Error] Camera script failed to initialize.")
+                log("Camera script failed to initialize.", "System", "ERROR")
 
                 # Check for error output
                 if proc.poll() is not None:
                     # Process died, read stderr
                     err_out = proc.stderr.read().decode('utf-8', errors='ignore')
                     if err_out:
-                        console_msg(f"\n--- CONTROLLER CRASH LOG ---\n{err_out}\n----------------------------")
+                        log(f"\n--- CONTROLLER CRASH LOG ---\n{err_out}\n----------------------------", "System", "ERROR")
                     else:
-                        console_msg("[Error] Process died silently.")
+                        log("Process died silently.", "System", "ERROR")
                 else:
-                    console_msg("[Error] Process timed out (no PID file).")
+                    log("Process timed out (no PID file).", "System", "ERROR")
                     try: proc.kill()
                     except: pass
 
                 return
 
             RPR_Main_OnCommand(1013, 0) # Record REAPER
-            console_msg(f"[Camera] Started.")
+            log("Started.", "System")
             # Exit immediately to avoid "Terminate Instance" dialog
             # The controller script runs in background
 
         except Exception as e:
-            console_msg(f"Start failed: {e}")
+            log(f"Start failed: {e}", "System", "ERROR")
 
     @staticmethod
     def stop(save=True):
@@ -353,8 +364,8 @@ class CameraProcess:
         filename = "canon_edsdk_cmd_save" if save else "canon_edsdk_cmd_cancel"
         cmd_path = os.path.join(TEMP_DIR, filename)
 
-        if save: console_msg("[Camera] Stopping & Downloading...")
-        else: console_msg("[Camera] Cancelling...")
+        if save: log("Stopping & Downloading...", "System")
+        else: log("Cancelling recording...", "System")
 
         try:
             # "Touch" the command file to signal the controller
@@ -366,7 +377,7 @@ class CameraProcess:
             RPR_defer("CameraProcess.monitor_download_loop()")
 
         except Exception as e:
-            console_msg(f"[Camera] Error: {e}")
+            log(f"IPC Error: {e}", "System", "ERROR")
 
     @staticmethod
     def monitor_download_loop():
@@ -385,18 +396,26 @@ class CameraProcess:
 
                     if new_data:
                         for line in new_data.split('\n'):
-                            line = line.strip()
-                            if not line: continue
+                            if not line.strip(): continue
 
-                            if line.startswith("LOG:"):
-                                RPR_ShowConsoleMsg(line[4:] + "\n")
-                            elif line.startswith("RESULT:"):
-                                path = line[7:].strip()
+                            # Robust parsing using partition (safe against missing colons)
+                            # Expects: TYPE:MESSAGE
+                            msg_type, sep, payload = line.partition(":")
+
+                            if not sep: continue # Malformed line, skip
+
+                            if msg_type == "LOG":
+                                # Controller logs no longer contain [Camera] prefix
+                                # We add it here by using the "Camera" context
+                                log(payload, "Camera")
+
+                            elif msg_type == "RESULT":
+                                path = payload.strip()
                                 if CameraProcess.save_mode:
                                     CameraProcess.finish_import(path, CameraProcess.audio_item_ref)
-
                                 CameraProcess.cleanup()
                                 return
+
             except Exception:
                 pass # File busy or locking issue, retry next tick
 
@@ -423,11 +442,13 @@ class CameraProcess:
 
         vid_item = insert_video(vid_path)
         if vid_item:
-            console_msg(f"[Camera] Imported.")
+            log("Video imported to timeline.", "System")
             if audio_item:
                 run_synchronization(audio_item, vid_item, vid_path)
             else:
-                console_msg("[Sync] Skipped: No audio recording found.")
+                log("No audio recording found. Skipping sync.", "Sync", "WARNING")
+
+        log("Done.", "System")
 
 # ==============================================================================
 # 5. ENTRY POINT
@@ -496,13 +517,13 @@ def main():
         # Process is dead or not found
         if pid:
             # If a PID file existed but process was dead, check logs to see why it crashed
-            console_msg(f"[Warning] Previous process {pid} not found (Crashed?). Starting new session...")
+            log(f"Cleaning up previous session (PID {pid})...", "System", "WARNING")
             if os.path.exists(LOG_FILE):
                 try:
                     with open(LOG_FILE, 'r') as f:
                         lines = f.readlines()
                         if lines:
-                            console_msg(f"--- Last Log Lines ---\n{''.join(lines[-3:])}----------------------")
+                             log(f"\n--- Last Log Lines ---\n{''.join(lines[-3:])}----------------------", "System", "WARNING")
                 except: pass
 
         CameraProcess.start()

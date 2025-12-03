@@ -2,8 +2,7 @@
 """
 canon_edsdk_controller.py
 ---------------------------------
-Headless script to control Canon cameras via EDSDK.
-Features:
+Headless script to control Canon cameras via EDSDK.Features:
 - Robust recording start/stop with retry logic.
 - Automatic file download via event callbacks.
 - File-based IPC for Stop/Cancel commands and Logging.
@@ -45,26 +44,36 @@ _download_queue = []
 _stop_event = threading.Event()
 _should_download = True
 
-def log(msg):
-    """Writes log messages to a shared file for REAPER to tail."""
+def ipc_send(msg_type, payload):
+    """
+    Unified Logging/IPC handler.
+    Writes to stdout for debug, and LOG_FILE for REAPER.
+    msg_type: 'LOG' (Log) or 'RESULT' (Final path)'
+    """
     # Always print to stdout (helpful for debugging if running manually)
-    print(msg)
+    full_msg = f"[{msg_type}] {payload}"
+    print(full_msg)
     sys.stdout.flush()
 
     # Append to log file for REAPER
+    # Format is strictly KEY:VALUE\n
     try:
         with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"LOG:{msg}\n")
+            f.write(f"{msg_type}:{payload}\n")
     except Exception:
         pass # Don't crash if disk is busy
 
+def log(msg):
+    """
+    Wrapper for standard info messages.
+    Writes log messages to file.
+    Standard stdout is for debug/console use.
+    """
+    ipc_send("LOG", msg)
+
 def send_result(path):
-    """Writes the final result path to the log file."""
-    try:
-        with open(LOG_FILE, 'a', encoding='utf-8') as f:
-            f.write(f"RESULT:{path}\n")
-    except Exception:
-        pass
+    """Wrapper for writing the final result path to the log file."""
+    ipc_send("RESULT", path)
 
 def verify_video_integrity(filepath):
     """
@@ -85,7 +94,7 @@ def verify_video_integrity(filepath):
 
     # 2. If FFmpeg is missing, we rely solely on the size check (already passed)
     if not ffmpeg_bin:
-        log("Warning: FFmpeg not found. Integrity check limited to file size.")
+        log("[WARNING] FFmpeg not found. Integrity check limited to file size.")
         return True
 
     # 3. Run FFmpeg to check for stream errors
@@ -111,12 +120,12 @@ def verify_video_integrity(filepath):
         if result.returncode == 0:
             return True
         else:
-            log(f"Integrity Check Failed (Corruption detected): {result.stderr.decode()}")
+            log(f"[ERROR] Integrity Check Failed (Corruption detected): {result.stderr.decode()}")
             return False
 
     except Exception as e:
         # If the check itself crashes, we should NOT delete the file to be safe.
-        log(f"Verification process error: {e}")
+        log(f"[ERROR] Verification process error: {e}")
         return False
 
 # ==============================================================================
@@ -126,7 +135,7 @@ def verify_video_integrity(filepath):
 def on_object_event(event, inRef, context):
     """Called by camera when a file is created (kEdsObjectEvent_DirItemCreated)."""
     if event == kEdsObjectEvent_DirItemCreated:
-        log("New file detected on camera.")
+        log("New file detected on SD card.")
 
         # Retain reference so it doesn't vanish before we download it
         if inRef:
@@ -142,7 +151,7 @@ def on_object_event(event, inRef, context):
 @EdsProgressCallback
 def on_progress(percent, context, cancel):
     """Called during file download to report progress."""
-    log(f"Progress: {percent}%")
+    log(f"Download Progress: {percent}%")
     return 0
 
 # ==============================================================================
@@ -217,7 +226,7 @@ class CameraSession:
                 sdk.lib.EdsGetEvent() # Pump events
                 time.sleep(0.1 * (i + 1)) # Backoff: 0.1s, 0.2s, 0.3s...
             else:
-                log(f"Warning: {desc} error {hex(err)}")
+                log(f"[WARNING] {desc} error {hex(err)}")
                 break
 
         if err != EDS_ERR_OK and desc == "Start Record":
@@ -255,10 +264,10 @@ class CameraSession:
         """Deletes all files in the queue (used for Cancel workflow)."""
         for item_ref in _download_queue:
             try:
-                log("Cancelling: Deleting file from card...")
+                log("Deleting file from SD card...")
                 err = sdk.lib.EdsDeleteDirectoryItem(item_ref)
                 if err != 0:
-                    log(f"Warning: Delete failed (Err {hex(err)})")
+                    log(f"[WARNING] Delete failed (Err {hex(err)})")
                 else:
                     log("File deleted.")
             finally:
@@ -274,7 +283,7 @@ class CameraSession:
 
         stream = c_void_p()
         if sdk.lib.EdsCreateFileStream(save_path.encode("utf-8"), 1, 2, byref(stream)) != 0:
-            log("File create failed.")
+            log("[ERROR] File create failed.")
             return
 
         try:
@@ -292,7 +301,7 @@ class CameraSession:
         # 1. Size Verification
         local_size = os.path.getsize(save_path)
         if local_size != info.size:
-            log(f"CRITICAL: Size mismatch! Camera: {info.size}, Local: {local_size}")
+            log(f"[ERROR] Size mismatch! Camera: {info.size}, Local: {local_size}")
             # Do NOT delete from camera. Do NOT send result.
             return
 
@@ -306,13 +315,13 @@ class CameraSession:
             if err == EDS_ERR_OK:
                 log("File deleted from camera.")
             else:
-                log(f"Warning: Delete failed (Err {hex(err)})")
+                log(f"[WARNING] Delete failed (Err {hex(err)})")
 
             # Only send result if we are confident the file is good
             log(f"Saved: {save_path}")
             send_result(save_path)
         else:
-            log("CRITICAL: File corrupted. NOT deleting from camera.")
+            log("[ERROR] File corrupted. NOT deleting from camera.")
             # Do NOT send result.
 
     def close(self):
@@ -325,7 +334,7 @@ class CameraSession:
             sdk.lib.EdsCloseSession(self.cam)
             sdk.lib.EdsRelease(self.cam)
         sdk.lib.EdsTerminateSDK()
-        log("Done.")
+        log("Session Closed.")
 
 # ==============================================================================
 # MAIN EXECUTION
@@ -416,13 +425,12 @@ def main():
             if _should_download and file_ready:
                 session.download_pending_files(dest_folder)
             elif not file_ready:
-                log("Warning: Timed out waiting for file generation.")
+                log("[WARNING] Timed out waiting for file generation.")
             else:
-                log("Command: Cancel. Cleaning up SD card...")
                 session.delete_pending_files()
 
     except Exception as e:
-        log(f"Error: {e}")
+        log(f"[ERROR] {e}")
         import traceback
         traceback.print_exc()
     finally:

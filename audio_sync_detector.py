@@ -48,7 +48,7 @@ def extract_audio_segment(path, duration):
         print(f"FFmpeg Error: {e.stderr.decode()}", file=sys.stderr)
         return None
     except Exception as e:
-        print(f"Error: {e}", file=sys.stderr)
+        print(f"Extraction Error: {e}", file=sys.stderr)
         return None
 
 def preprocess_signal(data):
@@ -120,12 +120,12 @@ def main():
     tgt_audio = extract_audio_segment(tgt_path, SCAN_DURATION)
 
     if ref_audio is None or tgt_audio is None:
-        print("Error reading audio files", file=sys.stderr)
+        print("Failed to read audio streams.", file=sys.stderr)
         sys.exit(1)
 
     # Check for empty audio
     if len(ref_audio) == 0 or len(tgt_audio) == 0:
-        print("Error: Audio track is empty.", file=sys.stderr)
+        print("Audio track is empty.", file=sys.stderr)
         sys.exit(1)
 
     # 2. Calculate Offset
@@ -137,7 +137,7 @@ def main():
         sys.exit(0)
 
     except Exception as e:
-        print(f"Sync calculation failed: {e}", file=sys.stderr)
+        print(f"Calculation failed: {e}", file=sys.stderr)
         sys.exit(1)
 
 if __name__ == "__main__":
