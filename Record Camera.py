@@ -122,6 +122,34 @@ TEMP_DIR = tempfile.gettempdir()
 PID_FILE = os.path.join(TEMP_DIR, "canon_edsdk_controller.pid")
 LOG_FILE = os.path.join(TEMP_DIR, "canon_edsdk_controller.log")
 
+FFMPEG_PATHS_MACOS = [
+    "/usr/local/bin",
+    "/opt/homebrew/bin",
+    "/usr/homebrew/bin",
+    BASE_DIR,
+]
+
+def get_path_env():
+    """Returns system PATH that is necessary for the Python process to find ffmpeg"""
+    # Env setup
+    env = os.environ.copy()
+
+    # Add local dir to path for .so/.dll loading
+    if platform.system() == "Windows":
+            env["PATH"] = f"{BASE_DIR};{env.get('PATH','')}"
+    elif platform.system() == "Darwin":  # macOS
+        # Fix PATH since REAPER.app strips it
+        extra_paths = [
+            "/usr/local/bin",        # Intel brew (older Macs)
+            "/opt/homebrew/bin",     # Apple Silicon brew
+            "/usr/homebrew/bin",     # custom brew prefix (your case)
+            BASE_DIR,                # local libs/binaries
+        ]
+        env["PATH"] = ":".join([env.get("PATH", "")] + extra_paths)
+    else:
+        env["LD_LIBRARY_PATH"] = f"{BASE_DIR}:{env.get('LD_LIBRARY_PATH','')}"
+    return env
+
 def get_project_path():
     path = RPR_GetProjectPath("", 512)[0]
     if not path:
@@ -174,12 +202,17 @@ def insert_video(filepath, track_name="Video"):
 
 def check_ffmpeg_installed():
     """Checks if ffmpeg is available for sync."""
+
+    path = ":".join(FFMPEG_PATHS_MACOS) if platform.system() == "Darwin" else None
     # Check PATH
-    if shutil.which("ffmpeg"): return True
+    if shutil.which(
+        "ffmpeg", 
+        path=path):
+        return True
 
     # Check Script Dir (Using BASE_DIR instead of __file__)
     if os.path.exists(os.path.join(BASE_DIR, "ffmpeg.exe")): return True
-
+    
     return False
 
 def get_last_audio_item():
@@ -207,7 +240,7 @@ def detect_offset(ref_path, target_path):
     """Runs the python sync detector and returns float offset in seconds."""
     try:
         cmd = [PYTHON_EXEC, AUDIO_SYNC_SCRIPT, ref_path, target_path]
-        res = subprocess.run(cmd, capture_output=True, text=True)
+        res = subprocess.run(cmd, capture_output=True, text=True, env=get_path_env())
         if res.returncode == 0:
             return float(res.stdout.strip())
         else:
@@ -284,15 +317,6 @@ class CameraProcess:
         # Reset log tracking
         CameraProcess.last_log_pos = 0
 
-        # Env setup
-        env = os.environ.copy()
-
-        # Add local dir to path for .so/.dll loading
-        if platform.system() == "Windows":
-             env["PATH"] = f"{BASE_DIR};{env.get('PATH','')}"
-        else:
-             env["LD_LIBRARY_PATH"] = f"{BASE_DIR}:{env.get('LD_LIBRARY_PATH','')}"
-
         try:
             log(f"Using Python: {PYTHON_EXEC}", "System")
 
@@ -302,7 +326,7 @@ class CameraProcess:
             # DEBUG: Capture stderr to see why it crashes
             proc = subprocess.Popen(
                 [PYTHON_EXEC, "-u", RECORD_SCRIPT, get_project_path(), "3600"],
-                cwd=BASE_DIR, env=env, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                cwd=BASE_DIR, env=get_path_env(), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
                 creationflags=creation_flags
             )
 
