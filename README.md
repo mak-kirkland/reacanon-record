@@ -8,6 +8,12 @@ This toolset integrates Canon DSLRs directly into REAPER, treating the camera as
 - **Auto-Sync:** Uses FFT-based audio cross-correlation to align the camera video with your high-quality audio recording (requires a clap/slate).
 - **Background Processing:** Keeps REAPER responsive while the camera is recording.
 
+## Support
+
+If you find this script useful, please consider supporting on Patreon:
+
+❤️ [Support on Patreon](https://patreon.com/MichaelKirkland)
+
 ---
 
 ## 1. Prerequisites
