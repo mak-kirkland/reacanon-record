@@ -10,8 +10,9 @@ This toolset integrates Canon DSLRs directly into REAPER, treating the camera as
 
 ## Support
 
-If you find this script useful, please consider supporting on Patreon:
+If you find this script useful, please consider supporting me:
 
+☕️ [Buy Me a Coffee](https://buymeacoffee.com/chronicler)
 ❤️ [Support on Patreon](https://patreon.com/MichaelKirkland)
 
 ---
