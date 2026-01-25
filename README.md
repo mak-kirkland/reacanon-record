@@ -2,6 +2,8 @@
 
 This toolset integrates Canon DSLRs directly into REAPER, treating the camera as a native media source. It handles recording triggers, automatic file downloading, and **sample-accurate audio/video synchronization** using a clap/slate.
 
+![ReaCanon](https://github.com/user-attachments/assets/6c5eeec0-66d1-4e43-afc8-4f18ea1d6107)
+
 ## Features
 - **Remote Trigger:** Start/Stop camera recording directly from REAPER.
 - **Auto-Import:** Automatically downloads the video file to your project after recording.
@@ -10,7 +12,7 @@ This toolset integrates Canon DSLRs directly into REAPER, treating the camera as
 
 ## Support
 
-If you find this script useful, please consider supporting me:
+If you find this script useful, please consider supporting:
 
 ☕️ [Buy Me a Coffee](https://buymeacoffee.com/chronicler)
 ❤️ [Support on Patreon](https://patreon.com/MichaelKirkland)
